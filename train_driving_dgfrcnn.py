@@ -1,164 +1,49 @@
 #!/usr/bin/python -tt
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-# Common imports
-import math
-import sys
-import time
+
+#Example run:
+# python3 train_driving_dgfrcnn.py --exp dg --source_domains AC --target_domains A --weights_folder AC2A --weights_file ac2a_dgfrcnn --reg_weights 0.5 0.5 0.5 0.05 0.0001
+#Here, A,B,C refer to the datasets ADCD, DCC100K and Cityscapes.   
+#This command trains on datasets A and C and runs on dataset A.
+
+from __future__ import absolute_import, division, print_function
+
+import math, sys, time, random, os
 from tqdm.notebook import tqdm
 import numpy as np
 from pathlib import Path
-import pandas as pd
-import random
-import cv2
 import matplotlib.pyplot as plt
 import argparse
-import os
 
-# Torch imports 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset, WeightedRandomSampler
+from torch.autograd import Variable, Function
 
 import torchvision
-from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+import torchvision.models as models
 import torchvision.transforms as transforms
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.ops.boxes import box_iou
 from torchvision.models.detection._utils import Matcher
 from torchvision.ops import nms, box_convert
-import torch.nn.functional as F
 from torchmetrics.detection import MeanAveragePrecision
 
-# Albumentations is used for the Data Augmentation
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
-# Pytorch import
 from pytorch_lightning.core.module import LightningModule
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import Callback, ModelCheckpoint
-from torch.utils.data import Subset, WeightedRandomSampler
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 
-import random
-import torch
-import torch.nn.functional as F
-from torch.autograd import Variable
-import torchvision.models as models
-from torch.autograd import Variable
-import numpy as np
-#from model.utils.config import cfg
-import torch.nn as nn
-from torch.autograd import Function
-import cv2
+from DrivingDataset import *
 
-
-torch.manual_seed(42)
-np.random.seed(42)
-random.seed(42)
-seed_everything(42)
-
-class DrivingDataset(Dataset):
-    #Dataset class applicable for BDD100K, Cityscapes and Foggycityscapes
-    def __init__(self, csv_file, root, domain, transform=None):
-        """
-        Args:
-            csv_file (string): Path to the csv file with annotations.
-            root_dir (string): Directory with all the images.
-            transform (callable, optional): Optional data augmentation to be applied on a sample.
-        """
-        self.csv_file = csv_file
-        
-        annotations = pd.read_csv(self.csv_file)
-
-        self.image_path = annotations["image_name"]
-        self.root_dir = root
-        self.boxes = [self.decodeString(item) for item in annotations["BoxesString"]]
-        self.labels = [self.decodeLabString(item) for item in annotations["LabelsString"]]
-        self.domain = domain
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.image_path)
-
-    def __getitem__(self, idx):
-        
-        imgp = self.root_dir + self.image_path[idx]
-        labels = self.labels[idx] 
-        bboxes = self.boxes[idx]
-        img = cv2.imread(imgp)
-        image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) # Opencv open images in BGR mode by default
-        
-        # A few boxes in BDD100K are having incorrect annotations. The following two lines will 
-        # aid in needed corrections. 
-        
-        if(len(bboxes) > 0):
-          bboxes[:, 0] = np.clip(bboxes[:, 0], 0, img.shape[1]-1)
-          bboxes[:, 1] = np.clip(bboxes[:, 1], 0, img.shape[0]-1)
-          bboxes[:, 2] = np.clip(bboxes[:, 2], 1, img.shape[1]-1)
-          bboxes[:, 3] = np.clip(bboxes[:, 3], 1, img.shape[0]-1)
-        
-          bboxes[:, 0][bboxes[:, 0] == bboxes[:, 2]] = bboxes[:, 0][bboxes[:, 0] == bboxes[:, 2]] - 1
-          bboxes[:, 1][bboxes[:, 1] == bboxes[:, 3]] = bboxes[:, 1][bboxes[:, 1] == bboxes[:, 3]] - 1
-          #bboxes[:, 2][bboxes[:, 0] == bboxes[:, 2]] = bboxes[:, 2][bboxes[:, 0] == bboxes[:, 2]] + 1
-          #bboxes[:, 3][bboxes[:, 1] == bboxes[:, 3]] = bboxes[:, 1][bboxes[:, 1] == bboxes[:, 3]] + 1       
-        
-        transformed = self.transform(image=image,bboxes=bboxes,class_labels=labels) #Albumentations can transform images and boxes
-        image = (transformed["image"]/255.0).float()
-        bboxes = np.array(transformed["bboxes"])
-        labels = transformed["class_labels"]
-        
-        if len(bboxes) > 0:
-          bboxes = torch.tensor(bboxes)
-          labels = torch.tensor(labels)
-        else:
-          bboxes = torch.zeros((0,4))
-          labels = torch.tensor([])        
-          
-        #if len(bboxes) > 0:
-        #bboxes = torch.stack([torch.tensor(item) for item in bboxes])
-        #labels = torch.stack([torch.tensor(item) for item in labels])
-        #else:
-          #bboxes = torch.zeros((0,4))
-          #labels = torch.zeros(1)        
-          
-        return image, bboxes, labels, self.domain
-
-    def decodeLabString(self, LabelsString):
-      """
-      Small method to decode the BoxesString
-      """
-      #labels_to_ind = {'person':1, 'rider': 2,'car': 3,'truck': 4, 'bus':5, 'train':6, 'motorcycle':7, 'bicycle':8}
-      if LabelsString == "no_label":
-          return np.array([])
-      else:
-          try:
-            labels =  np.array([int(label) for label in LabelsString.split(";")])
-            return labels
-              
-          except:
-            print(LabelsString)
-            print("Submission is not well formatted. empty boxes will be returned")
-            return np.array([])
-              
-    def decodeString(self,BoxesString):
-      """
-      Small method to decode the BoxesString
-      """
-      if BoxesString == "no_box":
-          #return np.zeros((0,4))
-          return np.array([])
-      else:
-          try:
-              boxes =  np.array([np.array([float(i) for i in box.split(" ")])
-                              for box in BoxesString.split(";")])
-              return boxes.astype(np.int32).clip(min=0)
-          except:
-              print(BoxesString)
-              print("Submission is not well formatted. empty boxes will be returned")
-              return np.zeros((0,4))
+SEED=42
+torch.manual_seed(SEED)
+np.random.seed(SEED)
+random.seed(SEED)
+seed_everything(SEED)
 
 
 train_transform = A.Compose(
