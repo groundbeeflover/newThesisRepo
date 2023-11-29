@@ -8,8 +8,11 @@ This repo will have all the codes that are needed to replicate the results for o
 We use the following four datasets.  You can download them from these links. Some require you to create an account first.
 
 A. [Adverse Conditions Dataset with Correspondences (ACDC)](https://acdc.vision.ee.ethz.ch/download)
+
 B. [Berkely Deep Drive 100K (BDD100K)](https://bdd-data.berkeley.edu/)
+
 C. [Cityscapes](https://www.cityscapes-dataset.com/)
+
 D. [Indian Driving Dataset (IDD)](https://idd.insaan.iiit.ac.in/)
 
 Our code expects the input data format to be in csv format and we provide necessary helper functions to convert the annotations of all the above datasets into csv format. But we expect the user to download the datasets from respective websites and set up the file structure mentioned below so that the code can directly access the datasets.   Note that for BDD100K, we use the 10K split provided by the dataset for training our models. 
