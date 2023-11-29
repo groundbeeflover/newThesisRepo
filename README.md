@@ -84,7 +84,7 @@ This will generate the following csv files in Annots folder where a subset of th
 
 # Model install and setup
 
-We recommend to use '[Anaconda'](https://docs.anaconda.com/anaconda/install/linux/) to create a self-contained python environment for the models. Using anaconda, the following creates then activates a new environment:
+We running the code in [Anaconda](https://docs.anaconda.com/anaconda/install/linux/) to create a self-contained python environment. Using Anaconda, the following creates then activates a new environment:
 ```
 conda create -n DGOD python
 conda activate DGOD
