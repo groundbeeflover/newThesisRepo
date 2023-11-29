@@ -122,7 +122,7 @@ It is important to note that, 'dg' mode needs more than one source domains else 
 The code is tested on a 24Gb GPU.   It may run on smaller GPUs, but if they run out of memory this can freeze your graphical desktop display.   To reduce memory usage in this instance, try reducing the number of workers from 16 to 4 in this line of train_dgfrcnn.py,
 ```
       return torch.utils.data.DataLoader(tr_dataset, batch_size=self.batch_size, sampler=sample_indices, shuffle=False, collate_fn=collate_fn, num_workers=16)    
-'''
+```
 
 
 
