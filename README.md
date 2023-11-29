@@ -13,7 +13,7 @@ B. [Berkely Deep Drive 100K (BDD100K)](https://bdd-data.berkeley.edu/)
 
 C. [Cityscapes](https://www.cityscapes-dataset.com/)
 
-D. [Indian Driving Dataset (IDD)](https://idd.insaan.iiit.ac.in/)
+I. [Indian Driving Dataset (IDD)](https://idd.insaan.iiit.ac.in/)
 
 Our code expects the input data format to be in csv format and we provide necessary helper functions to convert the annotations of all the above datasets into csv format. But we expect the user to download the datasets from respective websites and set up the file structure mentioned below so that the code can directly access the datasets.   Note that for BDD100K, we use the 10K split provided by the dataset for training our models. 
 
@@ -110,6 +110,8 @@ The following are the sample commands that can be used to train the Faster R-CNN
 python train_driving_dgfrcnn.py --exp non_dg --source_domains A  --target_domains I --weights_folder ABC2I --weights_file singlebest_a2i_frcnn 
 python train_driving_dgfrcnn.py --exp dg --source_domains ABC  --target_domains I --weights_folder ABC2I --weights_file abc2i_dgfrcnn --reg_weights 0.5 0.5 0.5 0.05 0.0001
 ```
+
+Here the codes A,B,C and I refer to the four datasets.
 
 The following are the sample commands that can be used to train the FCOS in non-dg and dg modes, respectively. 
 ```
