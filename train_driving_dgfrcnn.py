@@ -1,7 +1,7 @@
 #!/usr/bin/python -tt
 
 #Example run:
-# python3 train_driving_dgfrcnn.py --exp dg --source_domains AC --target_domains A --weights_folder AC2A --weights_file ac2a_dgfrcnn --reg_weights 0.5 0.5 0.5 0.05 0.0001
+# python3 train_driving_dgfrcnn.py --exp dg --source_domains AC --target_domains A --weights_folder AC2A --weights_file ac2a_dgfrcnn --reg_weights 0.5 0.5 0.1 0.05 0.0001
 #Here, A,B,C refer to the datasets ADCD, DCC100K and Cityscapes.   
 #This command trains on datasets A and C and runs on dataset A.
 
@@ -297,7 +297,7 @@ class DGFRCNN(LightningModule):
         self.InsCls = nn.ModuleList([_InsCls(n_classes) for i in range(self.num_domains)])
         self.InsClsPrime = nn.ModuleList([_InsClsPrime(n_classes) for i in range(self.num_domains)])
         
-        self.base_lr = 2e-3 #Original base lr is 1e-4
+        self.base_lr = 2e-3 
         self.momentum = 0.9
         self.weight_decay=0.0005
         
@@ -341,25 +341,6 @@ class DGFRCNN(LightningModule):
       return [optimizer], [lr_scheduler]
       
      
-    
-    def train_dataloader(self):
-      num_train_sample_batches = len(tr_dataset)//self.batch_size
-      temp_indices = np.array([i for i in range(len(tr_dataset))])
-      np.random.shuffle(temp_indices)
-      sample_indices = []
-      for i in range(num_train_sample_batches):
-  
-        batch = temp_indices[self.batch_size*i:self.batch_size*(i+1)]
-  
-        for index in batch:
-          sample_indices.append(index)  #This is for mode 0
-  
-        if(self.exp == 'dg'):
-          for index in batch:		   #This is for mode 1
-            sample_indices.append(index)
-      
-      return torch.utils.data.DataLoader(tr_dataset, batch_size=self.batch_size, sampler=sample_indices, shuffle=False, collate_fn=collate_fn, num_workers=16)      
-
       
     def training_step(self, batch, batch_idx):
       
@@ -377,53 +358,32 @@ class DGFRCNN(LightningModule):
       #Detection using source images
       
       if self.mode == 0:
-       
+        
+        loss_dict = {}
+        	
         detections = self.detector(imgs, targets)
         loss = sum([loss for detection in detections for loss in detection['losses'].values()])
         
+        loss_dict['detection_loss'] = loss
         
-        if(self.exp == 'dg'):             
-          if(self.sub_mode == 0):
-            self.mode = 1
-            self.sub_mode = 1
-          elif(self.sub_mode == 1):
-            self.mode = 2
-            self.sub_mode = 2
-          elif(self.sub_mode == 2):
-            self.mode = 3
-            self.sub_mode = 3
-          elif(self.sub_mode == 3):
-            self.mode = 4
-            self.sub_mode = 4  
-          else:
-            self.sub_mode = 0
-            self.mode = 0
+        if(self.exp == 'dg'):
+          ImgDA_scores = self.ImageDA(self.base_feat['0'])
+          loss_dict['DA_img_loss'] = self.reg_weights[0]*F.cross_entropy(ImgDA_scores, batch[3].to(device=0))
+          IDA_out = self.InsDA(self.box_features)
+          rep_factor = int(IDA_out.shape[0]/self.batch_size)
+          ins_labels = batch[3].reshape(self.batch_size,1).repeat(1, rep_factor).reshape(IDA_out.shape[0])       
+          loss_dict['DA_ins_loss'] = self.reg_weights[1]*F.cross_entropy(IDA_out, ins_labels.to(device=0))
         
+          ExpImgDA_scores =ImgDA_scores.repeat(1, rep_factor).reshape(IDA_out.shape[0], self.num_domains)
         
-      elif(self.mode == 1):
-        
-        loss_dict = {}
+          loss_dict['Cst_loss'] = self.reg_weights[2]*F.mse_loss(IDA_out, ExpImgDA_scores)       
+          self.mode = 1
           
-        _ = self.detector(imgs, targets)
-        ImgDA_scores = self.ImageDA(self.base_feat['0'])
-        loss_dict['DA_img_loss'] = self.reg_weights[0]*F.cross_entropy(ImgDA_scores, batch[3].to(device=0))
-        IDA_out = self.InsDA(self.box_features)
-        rep_factor = int(IDA_out.shape[0]/self.batch_size)
-        ins_labels = batch[3].reshape(self.batch_size,1).repeat(1, rep_factor).reshape(IDA_out.shape[0])       
-        loss_dict['DA_ins_loss'] = self.reg_weights[1]*F.cross_entropy(IDA_out, ins_labels.to(device=0))
-        
-        ExpImgDA_scores =ImgDA_scores.repeat(1, rep_factor).reshape(IDA_out.shape[0], self.num_domains)
-        
-        loss_dict['Cst_loss'] = self.reg_weights[2]*F.mse_loss(IDA_out, ExpImgDA_scores)       
-        loss = sum(loss1 for loss1 in loss_dict.values())
-                
-        
-        self.mode = 0
-              
-      elif(self.mode == 2): #Without recording the gradients for detector, we need to update the weights for classifier weights
+        loss = sum(loss1 for loss1 in loss_dict.values())        
+                      
+      elif(self.mode == 1): #Without recording the gradients for detector, we need to update the weights for classifier weights
         loss_dict = {}
         loss = []
-
         
         for index in range(self.num_domains):
           for param in self.InsCls[index].parameters(): param.requires_grad = True
@@ -435,11 +395,11 @@ class DGFRCNN(LightningModule):
           cls_scores = self.InsCls[batch[3][index].item()](self.box_features)
           loss.append(F.cross_entropy(cls_scores, self.box_labels[0])) 
 
-        loss_dict['cls'] = self.reg_weights[4]*(torch.mean(torch.stack(loss)))
+        loss_dict['cls'] = self.reg_weights[4]*(torch.sum(torch.stack(loss)))
         loss = sum(loss for loss in loss_dict.values())
 
-        self.mode = 0
-      elif(self.mode == 3): #Only the GRL Classification should influence the updates but here we need to update the detector weights as well
+        self.mode = 2
+      elif(self.mode == 2): #Only the GRL Classification should influence the updates but here we need to update the detector weights as well
         loss_dict = {}
         loss = []
     
@@ -448,12 +408,12 @@ class DGFRCNN(LightningModule):
           cls_scores = self.InsClsPrime[batch[3][index].item()](self.box_features)
           loss.append(F.cross_entropy(cls_scores, self.box_labels[0]))
   	  
-        loss_dict['cls_prime'] = self.reg_weights[3]*(torch.mean(torch.stack(loss)))
+        loss_dict['cls_prime'] = self.reg_weights[3]*(torch.sum(torch.stack(loss)))
         loss = sum(loss for loss in loss_dict.values())
 
-        self.mode = 0
+        self.mode = 3
         
-      else: #For Mode 4
+      else: #For Mode 3
       
         loss_dict = {}
         loss = []
@@ -469,19 +429,24 @@ class DGFRCNN(LightningModule):
               cls_scores = self.InsCls[i](self.box_features)
               loss.append(F.cross_entropy(cls_scores, self.box_labels[0]))
 
-        loss_dict['cls'] = self.reg_weights[4]*(torch.mean(torch.stack(loss))) 
+        loss_dict['cls'] = self.reg_weights[4]*(torch.sum(torch.stack(loss))) 
         loss = sum(loss for loss in loss_dict.values())
         
         self.mode = 0
-        self.sub_mode = 0
- 	 
+     		 
       return {"loss": loss}#, "log": torch.stack(temp_loss).detach().cpu()}
+
 
     def validation_step(self, batch, batch_idx):
       
       img, boxes, labels, domain = batch
       
       preds = self.forward(img)
+
+      for index in range(len(preds)):
+           preds[index]['boxes'] = preds[index]['boxes'][preds[index]['scores'] > 0.2]
+           preds[index]['labels'] = preds[index]['labels'][preds[index]['scores'] > 0.2]
+           preds[index]['scores'] = preds[index]['scores'][preds[index]['scores'] > 0.2]
       
       targets = []
       for boxes, labels in zip(batch[1], batch[2]):
@@ -595,6 +560,8 @@ if __name__ == '__main__':
   
   test_dataset = torch.utils.data.ConcatDataset(test_datasets) # Combine all the source domains with their respective domain_index for Testing
 
+
+  train_dataloader = torch.utils.data.DataLoader(tr_dataset, batch_size=8, shuffle=True, collate_fn=collate_fn, num_workers=16, drop_last=True)	
   val_dataloader = torch.utils.data.DataLoader(vl_dataset, batch_size=1, shuffle=False,  collate_fn=collate_fn)
   test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False,  collate_fn=collate_fn)
   
@@ -611,15 +578,10 @@ if __name__ == '__main__':
   early_stop_callback= EarlyStopping(monitor='val_acc', min_delta=0.00, patience=10, verbose=False, mode='max')
   checkpoint_callback = ModelCheckpoint(monitor='val_acc', dirpath=NET_FOLDER, filename=weights_file, mode='max')
   
-  trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], reload_dataloaders_every_n_epochs=1, num_sanity_val_steps=2)
-  trainer.fit(detector, val_dataloaders=val_dataloader)
-  
+  trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], num_sanity_val_steps=2)
+  trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
   
   detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])
   trainer = Trainer(accelerator="gpu", max_epochs=0, num_sanity_val_steps=-1)
-  trainer.fit(detector, val_dataloaders=test_dataloader)
-    
-
-  
-      
-
+  trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=test_dataloader)
+   
