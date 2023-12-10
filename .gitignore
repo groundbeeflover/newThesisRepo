@@ -1,0 +1,8 @@
+# Data images and generated annotations
+data/Annots/*
+data/ACDC/*
+data/Annots/*
+data/BDD100K/*
+data/Cityscapes/*
+data/IDD/*
+
