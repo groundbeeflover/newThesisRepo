@@ -343,7 +343,7 @@ class DGFCOS(LightningModule):
         self.log('val_acc', self.best_val_acc)
         self.metric = MeanAveragePrecision(iou_type="bbox", class_metrics=True, iou_thresholds = [0.5])   
 
-        self.base_lr = 1e-4 
+        self.base_lr = 1e-2 
         self.momentum = 0.9
         self.weight_decay=0.0001
         
@@ -374,7 +374,7 @@ class DGFCOS(LightningModule):
     
     def configure_optimizers(self):
       
-      optimizer = torch.optim.Adam([{'params': self.detector.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay },
+      optimizer = torch.optim.SGD([{'params': self.detector.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay },
                                     {'params': self.ImageDA.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay },
                                     {'params': self.InsDA.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay },
                                     {'params': self.InsCls.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay },
@@ -385,26 +385,7 @@ class DGFCOS(LightningModule):
                       'monitor': 'val_acc'}
       
       
-      return [optimizer], [lr_scheduler]
-        
-    def train_dataloader(self):
-      num_train_sample_batches = len(tr_dataset)//self.batch_size
-      temp_indices = np.array([i for i in range(len(tr_dataset))])
-      np.random.shuffle(temp_indices)
-      sample_indices = []
-      for i in range(num_train_sample_batches):
-  
-        batch = temp_indices[self.batch_size*i:self.batch_size*(i+1)]
-  
-        for index in batch:
-          sample_indices.append(index)  
-  
-        if(self.exp == 'dg'):
-          for index in batch:		   
-            sample_indices.append(index)
-      
-      return torch.utils.data.DataLoader(tr_dataset, batch_size=self.batch_size, sampler=sample_indices, shuffle=False, collate_fn=collate_fn, num_workers=16)      
- 
+      return [optimizer], [lr_scheduler] 
           
     def training_step(self, batch, batch_idx):
       
@@ -418,55 +399,26 @@ class DGFCOS(LightningModule):
         target["labels"] = labels.long().cuda()
         targets.append(target)
 
-      # fasterrcnn takes both images and targets for training, returns
       #Detection using source images
-      
       if self.mode == 0:
+        
+        main_loss_dict = {}
         
         loss_dict = self.detector(imgs, targets)
         loss = loss_dict['classification'] + loss_dict['bbox_regression'] + loss_dict['bbox_ctrness'] 
+        main_loss_dict['detection_loss'] = loss
         
-        
-        if(self.exp == 'dg'):             
-          if(self.sub_mode == 0):
-            self.mode = 1
-            self.sub_mode = 1
-          elif(self.sub_mode == 1):
-            self.mode = 2
-            self.sub_mode = 2
-          elif(self.sub_mode == 2):
-            self.mode = 3
-            self.sub_mode = 3
-          elif(self.sub_mode == 3):
-            self.mode = 4
-            self.sub_mode = 4  
-          else:
-            self.sub_mode = 0
-            self.mode = 0
-
-        
-      elif(self.mode == 1):
-        
-        loss_dict = {}
-        temp_loss = []
-        
-        
-        _ = self.detector(imgs, targets)
-        
-        ImgDA_scores = self.ImageDA(self.base_feat)
-        
-        loss_dict['DA_img_loss'] = self.reg_weights[0]*F.cross_entropy(ImgDA_scores, batch[3])
-        
-        IDA_out = self.InsDA(self.ins_feat)	
-        loss_dict['DA_ins_loss'] = self.reg_weights[1]*F.cross_entropy(IDA_out.permute(0, 2, 1), batch[3].unsqueeze(dim=-1).repeat(1, IDA_out.shape[1]).long())
-        
-        loss_dict['Cst_loss'] = self.reg_weights[2]*F.mse_loss(ImgDA_scores.unsqueeze(dim=1).repeat(1, IDA_out.shape[1], 1), IDA_out)
-        
-               
-        loss = sum(loss for loss in loss_dict.values())
-        self.mode = 0
-              
-      elif(self.mode == 2): #Without recording the gradients for detector, we need to update the weights for classifier weights
+        if(self.exp == 'dg'):
+          ImgDA_scores = self.ImageDA(self.base_feat)
+          main_loss_dict['DA_img_loss'] = self.reg_weights[0]*F.cross_entropy(ImgDA_scores, batch[3])
+          IDA_out = self.InsDA(self.ins_feat)	
+          main_loss_dict['DA_ins_loss'] = self.reg_weights[1]*F.cross_entropy(IDA_out.permute(0, 2, 1), batch[3].unsqueeze(dim=-1).repeat(1, IDA_out.shape[1]).long())
+          main_loss_dict['Cst_loss'] = self.reg_weights[2]*F.mse_loss(ImgDA_scores.unsqueeze(dim=1).repeat(1, IDA_out.shape[1], 1), IDA_out)
+          self.mode = 1
+          
+        loss = sum(loss for loss in main_loss_dict.values())  
+                              
+      elif(self.mode == 1): #Without recording the gradients for detector, we need to update the weights for classifier weights
         """
         loss_dict = {}
         loss = []
@@ -501,8 +453,8 @@ class DGFCOS(LightningModule):
         loss_dict['cls'] = self.reg_weights[4]*(torch.mean(torch.stack(loss)))
         loss = sum(loss for loss in loss_dict.values())
         
-        self.mode = 0
-      elif(self.mode == 3): #Only the GRL Classification should influence the updates but here we need to update the detector weights as well
+        self.mode = 2
+      elif(self.mode == 2): #Only the GRL Classification should influence the updates but here we need to update the detector weights as well
         """
         loss_dict = {}
         loss = []
@@ -529,7 +481,7 @@ class DGFCOS(LightningModule):
         loss_dict['cls_prime'] = self.reg_weights[3]*(torch.mean(torch.stack(loss)))
         loss = sum(loss for loss in loss_dict.values())
 
-        self.mode = 0
+        self.mode = 3
         
       else: #For Mode 4
         """
@@ -577,7 +529,6 @@ class DGFCOS(LightningModule):
         loss = sum(loss for loss in loss_dict.values())
         
         self.mode = 0
-        self.sub_mode = 0
  	 
       return {"loss": loss}#, "log": torch.stack(temp_loss).detach().cpu()}
 
@@ -587,6 +538,11 @@ class DGFCOS(LightningModule):
       
       preds = self.forward(img)
       
+      for index in range(len(preds)):
+           preds[index]['boxes'] = preds[index]['boxes'][preds[index]['scores'] > 0.2]
+           preds[index]['labels'] = preds[index]['labels'][preds[index]['scores'] > 0.2]
+           preds[index]['scores'] = preds[index]['scores'][preds[index]['scores'] > 0.2]
+           
       targets = []
       for boxes, labels in zip(batch[1], batch[2]):
         target= {}
@@ -702,6 +658,7 @@ if __name__ == '__main__':
   
   test_dataset = torch.utils.data.ConcatDataset(test_datasets) # Combine all the source domains with their respective domain_index for Testing
 
+  train_dataloader = torch.utils.data.DataLoader(tr_dataset, batch_size=8, shuffle=True, collate_fn=collate_fn, num_workers=16, drop_last=True)	
   val_dataloader = torch.utils.data.DataLoader(vl_dataset, batch_size=1, shuffle=False,  collate_fn=collate_fn)
   test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False,  collate_fn=collate_fn)
 
@@ -717,10 +674,10 @@ if __name__ == '__main__':
   early_stop_callback= EarlyStopping(monitor='val_acc', min_delta=0.00, patience=10, verbose=False, mode='max')
   checkpoint_callback = ModelCheckpoint(monitor='val_acc', dirpath=NET_FOLDER, filename=weights_file, mode='max')
   
-  trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], reload_dataloaders_every_n_epochs=1, num_sanity_val_steps=2)
-  trainer.fit(detector, val_dataloaders=val_dataloader)
-  
+  trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], num_sanity_val_steps=2)
+  trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
   
   detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])
   trainer = Trainer(accelerator="gpu", max_epochs=0, num_sanity_val_steps=-1)
-  trainer.fit(detector, val_dataloaders=test_dataloader)
+  trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=test_dataloader)
+

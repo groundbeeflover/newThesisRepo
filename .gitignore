@@ -8,6 +8,6 @@ data/IDD/*
 weights
 weights/*
 
-__pycache__/
-lightning_logs/
+__pycache__
+lightning_logs
 
