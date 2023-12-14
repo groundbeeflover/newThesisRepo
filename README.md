@@ -43,8 +43,8 @@ Our code expects the input data format to be in csv format and we provide necess
     |     |       ├── rain
     |     |       ├── snow
     |     |       ├──instancesonly_test_image_info.json
-    |     |       ├──instancesonly_train_image_info.json
-    |     |       ├──instancesonly_val_image_info.json
+    |     |       ├──instancesonly_train_gt_detection.json
+    |     |       ├──instancesonly_val_gt_detection.json
     |     ├── rgb_anon
     |     |       ├── fog
     |     |       ├── night
