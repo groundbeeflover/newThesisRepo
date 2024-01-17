@@ -7,7 +7,7 @@ data/Cityscapes/*
 data/IDD/*
 weights
 weights/*
-temp/*
+temp
 
 __pycache__
 lightning_logs
