@@ -115,6 +115,28 @@ class _ImageDA(nn.Module):
         
         return x
 
+class _InstanceDA(nn.Module):
+    def __init__(self, num_domains):
+        super(_InstanceDA,self).__init__()
+        self.num_domains = num_domains
+        self.dc_ip1 = nn.Linear(256, 128)
+        self.dc_relu1 = nn.ReLU()
+        #self.dc_drop1 = nn.Dropout(p=0.5)
+
+        self.dc_ip2 = nn.Linear(128, 64)
+        self.dc_relu2 = nn.ReLU()
+        #self.dc_drop2 = nn.Dropout(p=0.5)
+
+        self.classifer=nn.Linear(64,self.num_domains)
+        
+
+    def forward(self,x):
+        x=grad_reverse(x)
+        x=self.dc_relu1(self.dc_ip1(x))
+        x=self.dc_ip2(x)
+        x=torch.sigmoid(self.classifer(x))
+
+        return x
         
 def collate_fn(batch):
     """
@@ -156,6 +178,7 @@ class DGYOLO(LightningModule):
         self.detector = Darknet('./config/yolov3-custom-1280.cfg')        
         self.detector.load_darknet_weights('./weights/darknet53.conv.74')
         self.ImageDA = _ImageDA(256, self.num_domains)
+        self.InsDA = _InstanceDA(self.num_domains)
         
         
         self.base_lr = 0.001
@@ -175,7 +198,7 @@ class DGYOLO(LightningModule):
     
     def configure_optimizers(self):
       
-      optimizer = torch.optim.SGD([{'params': self.detector.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay }]) 
+      optimizer = torch.optim.Adam([{'params': self.detector.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay }]) 
       
       lr_scheduler = {'scheduler': torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', factor=0.1, patience=5, threshold=0.0001, min_lr=0, eps=1e-08),
                       'monitor': 'val_acc'}
@@ -210,16 +233,31 @@ class DGYOLO(LightningModule):
       if self.mode == 0:
         
         loss_dict = {}
-        	
-        detections, backbone_features = self.detector(imgs)
-        loss, loss_components = compute_loss(detections, targets, self.detector)
+
+        yolo_outputs, backbone_features, ins_feats = self.detector(imgs)
+        loss, loss_components = compute_loss(yolo_outputs, targets, self.detector)
         loss_dict['detection_loss'] = loss
         
         if(self.exp == 'dg'):
           
           ImgDA_scores = self.ImageDA(backbone_features)
           loss_dict['DA_img_loss'] = self.reg_weights[0]*F.cross_entropy(ImgDA_scores, batch[3])
-	  
+          
+          ins_feat = ins_feats[-1]
+          bs, c, y, x = ins_feat.shape
+          ins_feat = ins_feat.view(bs, c, y*x).permute(0, 2, 1)
+          IDA_out = self.InsDA(ins_feat)
+          rep_factor = IDA_out.shape[1]
+          ins_domain_labels = batch[3].reshape(self.batch_size,1).repeat(1, rep_factor)
+          loss_dict['DA_ins_loss'] = self.reg_weights[1]*F.cross_entropy(IDA_out.permute(0, 2, 1), ins_domain_labels.to(device=0))
+          
+          
+          ExpImgDA_scores = ImgDA_scores.clone().unsqueeze_(1).repeat(1, rep_factor, 1)
+          
+          loss_dict['Cst_loss'] = self.reg_weights[2]*F.mse_loss(IDA_out, ExpImgDA_scores)
+          
+          
+      
 	            
         loss = sum(loss1 for loss1 in loss_dict.values())        
                       		 
@@ -365,7 +403,7 @@ if __name__ == '__main__':
   test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False,  collate_fn=collate_fn)
   
   # Instantiating the detector
-  detector = DGYOLO(9, 8, args.exp, args.reg_weights) # Num classes + 1 and batch_size
+  detector = DGYOLO(9, 2, args.exp, args.reg_weights) # Num classes + 1 and batch_size
 
   if os.path.exists(NET_FOLDER+'/'+weights_file+'.ckpt'): 
     detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])
@@ -377,7 +415,7 @@ if __name__ == '__main__':
   early_stop_callback= EarlyStopping(monitor='val_acc', min_delta=0.00, patience=10, verbose=False, mode='max')
   checkpoint_callback = ModelCheckpoint(monitor='val_acc', dirpath=NET_FOLDER, filename=weights_file, mode='max')
   
-  trainer = Trainer(accelerator="gpu", max_epochs=1, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], num_sanity_val_steps=2)
+  trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], num_sanity_val_steps=2)
   trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
   
   detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])

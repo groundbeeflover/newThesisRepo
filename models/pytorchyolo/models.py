@@ -204,7 +204,7 @@ class Darknet(nn.Module):
 
     def forward(self, x):
         img_size = x.size(2)
-        layer_outputs, yolo_outputs = [], []
+        layer_outputs, yolo_outputs, ins_feats = [], [], []
         for i, (module_def, module) in enumerate(zip(self.module_defs, self.module_list)):
             if module_def["type"] in ["convolutional", "upsample", "maxpool"]:
                 x = module(x)
@@ -217,12 +217,13 @@ class Darknet(nn.Module):
                 layer_i = int(module_def["from"])
                 x = layer_outputs[-1] + layer_outputs[layer_i]
             elif module_def["type"] == "yolo":
+                ins_feats.append(layer_outputs[-2])
                 x = module[0](x, img_size)
                 yolo_outputs.append(x)
             layer_outputs.append(x)
         
         backbone_features = layer_outputs[36]    
-        return (yolo_outputs, backbone_features) if self.training else torch.cat(yolo_outputs, 1)
+        return (yolo_outputs, backbone_features, ins_feats) if self.training else torch.cat(yolo_outputs, 1)
 
     def load_darknet_weights(self, weights_path):
         """Parses and loads the weights stored in 'weights_path'"""
