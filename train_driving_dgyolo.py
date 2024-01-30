@@ -48,7 +48,7 @@ seed_everything(SEED)
 
 train_transform = A.Compose(
         [
-        A.Resize(height=1280, width=1280, p=1.0),
+        A.Resize(height=640, width=640, p=1.0),
         A.HorizontalFlip(p=0.5),     
         ToTensorV2(p=1.0),
         ], 
@@ -57,7 +57,7 @@ train_transform = A.Compose(
     )
 
 val_transform = A.Compose([
-    A.Resize(height=1280, width=1280, p=1.0),
+    A.Resize(height=640, width=640, p=1.0),
     ToTensorV2(p=1.0),
 ],p=1.0,bbox_params=A.BboxParams(format='pascal_voc',label_fields=['class_labels']))
 
@@ -87,7 +87,7 @@ class _ImageDA(nn.Module):
         self.Conv1 = nn.Conv2d(256, 256, 3, stride=4)
         self.Conv2 = nn.Conv2d(256, 256, 3, stride=4)
         self.Conv3 = nn.Conv2d(256, 256, 3, stride=4)
-        self.Conv4 = nn.Conv2d(256, 256, 2, stride=1)
+        #self.Conv4 = nn.Conv2d(256, 256, 2, stride=1)
         
         self.flatten = nn.Flatten()
         self.linear1 = nn.Linear(256, 128)
@@ -101,14 +101,14 @@ class _ImageDA(nn.Module):
         torch.nn.init.constant_(self.Conv2.bias, 0)
         torch.nn.init.normal_(self.Conv3.weight, std=0.001)
         torch.nn.init.constant_(self.Conv3.bias, 0)
-        torch.nn.init.normal_(self.Conv4.weight, std=0.001)
-        torch.nn.init.constant_(self.Conv4.bias, 0)
+        #torch.nn.init.normal_(self.Conv4.weight, std=0.001)
+        #torch.nn.init.constant_(self.Conv4.bias, 0)
     def forward(self,x):
         x=grad_reverse(x)
         x=self.reLu(self.Conv1(x))
         x=self.reLu(self.Conv2(x))
         x=self.reLu(self.Conv3(x))
-        x=self.reLu(self.Conv4(x))
+        #x=self.reLu(self.Conv4(x))
         x=self.flatten(x)
         x=self.reLu(self.linear1(x))
         x=F.sigmoid(self.linear2(x))
@@ -175,13 +175,13 @@ class DGYOLO(LightningModule):
         self.exp = exp
         self.reg_weights = reg_weights
         
-        self.detector = Darknet('./config/yolov3-custom-1280.cfg')        
+        self.detector = Darknet('./config/yolov3-custom-640.cfg')        
         self.detector.load_darknet_weights('./weights/darknet53.conv.74')
         self.ImageDA = _ImageDA(256, self.num_domains)
         self.InsDA = _InstanceDA(self.num_domains)
         
         
-        self.base_lr = 0.001
+        self.base_lr = 0.1
         self.momentum = 0.9
         self.weight_decay=0.0005
         
@@ -198,7 +198,9 @@ class DGYOLO(LightningModule):
     
     def configure_optimizers(self):
       
-      optimizer = torch.optim.Adam([{'params': self.detector.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay }]) 
+      optimizer = torch.optim.SGD([{'params': self.detector.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay},
+                                   {'params': self.ImageDA.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay },
+                                   {'params': self.InsDA.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay}]) 
       
       lr_scheduler = {'scheduler': torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', factor=0.1, patience=5, threshold=0.0001, min_lr=0, eps=1e-08),
                       'monitor': 'val_acc'}
@@ -221,14 +223,12 @@ class DGYOLO(LightningModule):
         boxes[:, 3] = boxes[:, 3] - boxes[:, 1] #h = ymax - ymin
         boxes[:, 0] = boxes[:, 0] + 0.5*boxes[:, 2] # xc = xmin + 0.5*w
         boxes[:, 1] = boxes[:, 1] + 0.5*boxes[:, 3] # yc = ymin + 0.5*h
-        target[:, 2:] = boxes / 1280.0 # Yolo bboxes are normalised between 0 and 1
+        target[:, 2:] = boxes / 640.0 # Yolo bboxes are normalised between 0 and 1
         target[:, 1] = labels - 1 # Yolo labels start from zero: Verify this correctly
         target[:, 0] = index # Yolo uses the sample index in the first column
         targets.append(target)
       
       targets = torch.cat(targets, dim=0).cuda()
-      
-      
 
       if self.mode == 0:
         
@@ -256,12 +256,76 @@ class DGYOLO(LightningModule):
           
           loss_dict['Cst_loss'] = self.reg_weights[2]*F.mse_loss(IDA_out, ExpImgDA_scores)
           
+          self.mode = 1
+              
+      elif(self.mode == 1): #Without recording the gradients for detector, we need to update the weights for classifier weights
+        
+        loss_dict = {}
+        loss = []
+        #for index in range(self.num_domains):
+          #for param in self.InsCls[index].parameters(): param.requires_grad = True
+         
+        for index in range(len(imgs)):
+          with torch.no_grad():
+            yolo_outputs, backbone_features, ins_feats = self.detector(imgs[index].unsqueeze(dim=0))
+          yolo_outputs[0].requires_grad = True
+          yolo_outputs[1].requires_grad = True
+          yolo_outputs[2].requires_grad = True
+          targets_indi = targets[targets[:, 0] == index]
+          targets_indi[:, 0] = 0
+          loss_indi, loss_components = compute_loss(yolo_outputs, targets_indi, self.detector)
           
+          loss.append(loss_indi) 
+
+        loss_dict['cls'] = self.reg_weights[4]*(torch.sum(torch.stack(loss)))
+        loss = sum(loss for loss in loss_dict.values())
+
+        self.mode = 2
+        
+      elif(self.mode == 2): #Only the GRL Classification should influence the updates but here we need to update the detector weights as well
       
-	            
-        loss = sum(loss1 for loss1 in loss_dict.values())        
-                      		 
-      return {"loss": loss}#, "log": torch.stack(temp_loss).detach().cpu()}
+        loss_dict = {}
+        loss = []
+    
+        for index in range(len(imgs)):
+          yolo_outputs, _, ins_feats = self.detector(imgs[index].unsqueeze(dim=0))
+          for index_y in range(len(yolo_outputs)):
+            yolo_outputs[index_y] = grad_reverse(yolo_outputs[index_y])
+          targets_indi = targets[targets[:, 0] == index]
+          targets_indi[:, 0] = 0
+          loss_indi, loss_components = compute_loss(yolo_outputs, targets_indi, self.detector)
+          loss.append(loss_indi)
+  	  
+        loss_dict['cls_prime'] = self.reg_weights[3]*(torch.sum(torch.stack(loss)))
+        loss = sum(loss for loss in loss_dict.values())
+
+        self.mode = 3
+        
+      else: #For Mode 3
+      
+        loss_dict = {}
+        loss = []
+        
+        #for index in range(self.num_domains):
+          #for param in self.InsCls[index].parameters(): param.requires_grad = False
+        
+        for index in range(len(imgs)):
+          yolo_outputs, backbone_features, ins_feats = self.detector(imgs[index].unsqueeze(dim=0))
+          
+          for i in range(self.num_domains):
+            if(i != batch[3][index].item()):
+              #cls_scores = self.InsCls[i](self.box_features)
+              targets_indi = targets[targets[:, 0] == index]
+              targets_indi[:, 0] = 0
+              loss_indi, loss_components = compute_loss(yolo_outputs, targets_indi, self.detector)
+              loss.append(loss_indi)
+
+        loss_dict['cls'] = self.reg_weights[4]*(torch.sum(torch.stack(loss))) 
+        loss = sum(loss for loss in loss_dict.values())
+        
+        self.mode = 0
+     		 
+      return {"loss": loss}#, "log": torch.stack(temp_loss).detach().cpu()
 
 
     def validation_step(self, batch, batch_idx):
@@ -271,7 +335,7 @@ class DGYOLO(LightningModule):
       targets = []
       for boxes, labels in zip(batch[1], batch[2]):
         target= {}
-        target["boxes"] = boxes.float().cuda() #/ 1280
+        target["boxes"] = boxes.float().cuda() #/ 640
         target["labels"] = labels.long().cuda() - 1
         targets.append(target)
         
@@ -286,7 +350,7 @@ class DGYOLO(LightningModule):
           #boxes[:, 1] = boxes[:, 1] - 0.5*boxes[:, 3] # ymin = yc - 0.5*h
           #boxes[:, 2] = boxes[:, 0] + boxes[:, 2] # xmax = xmin + w
           #boxes[:, 3] = boxes[:, 1] + boxes[:, 3] # ymax = ymin + h
-          pred['boxes'] = torch.clip(boxes, min=0, max=1280)
+          pred['boxes'] = torch.clip(boxes, min=0, max=640)
           pred['scores'] = det[:, 4].cuda()
           pred['labels'] = det[:, 5].to(torch.int32).cuda()
           preds.append(pred)
@@ -398,12 +462,12 @@ if __name__ == '__main__':
   test_dataset = torch.utils.data.ConcatDataset(test_datasets) # Combine all the source domains with their respective domain_index for Testing
 
 
-  train_dataloader = torch.utils.data.DataLoader(tr_dataset, batch_size=2, shuffle=True, collate_fn=collate_fn, num_workers=16, drop_last=True)	
+  train_dataloader = torch.utils.data.DataLoader(tr_dataset, batch_size=8, shuffle=True, collate_fn=collate_fn, num_workers=16, drop_last=True)	
   val_dataloader = torch.utils.data.DataLoader(vl_dataset, batch_size=1, shuffle=False,  collate_fn=collate_fn)
   test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False,  collate_fn=collate_fn)
   
   # Instantiating the detector
-  detector = DGYOLO(9, 2, args.exp, args.reg_weights) # Num classes + 1 and batch_size
+  detector = DGYOLO(9, 8, args.exp, args.reg_weights) # Num classes + 1 and batch_size
 
   if os.path.exists(NET_FOLDER+'/'+weights_file+'.ckpt'): 
     detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])
