@@ -1,0 +1,127 @@
+#This file is the helper code used to convert all the annotations into csv format
+import json
+import cv2
+import numpy as np
+from os import walk
+import pandas as pd
+import random
+import os, fnmatch
+import argparse
+
+
+
+def parser_args():
+  parser = argparse.ArgumentParser(description='Convert JSON2CSV')
+  parser.add_argument('--category', dest='category',
+                      help='all or car',
+                      default='all', type=str)
+                      
+  parser.add_argument('--weather', dest='weather',
+                      help='clear, foggy, rain',
+                      default='clear', type=str)
+                      
+  args = parser.parse_args()
+  return args
+  
+#Have only car object when a csv file contaning car object is needed. Cross dataset generalisation of our code use only car. 
+
+def encode_boxes(boxes):
+
+  if len(boxes) >0:
+    boxes = [" ".join([str(int(i)) for i in item]) for item in boxes]
+    BoxesString = ";".join(boxes)
+  else:
+    BoxesString = "no_box"
+  return BoxesString
+
+def encode_labels(labels):
+
+  if len(labels) >0:
+    labels = [" ".join([str(item)]) for item in labels]
+    LabelsString = ";".join(labels)
+  else:
+    LabelsString = "no_label"
+  return LabelsString
+  
+train_df = pd.DataFrame(columns=['image_name', 'BoxesString', 'LabelsString'])  
+val_df = pd.DataFrame(columns=['image_name', 'BoxesString', 'LabelsString'])
+
+train_obj_freq = {'person':0, 'rider': 0,'car': 0,'truck': 0, 'bus':0, 'train':0, 'motorcycle':0, 'bicycle':0}
+val_obj_freq = {'person':0, 'rider': 0,'car': 0,'truck': 0, 'bus':0, 'train':0, 'motorcycle':0, 'bicycle':0}
+
+#weather parameter can take one of the {'foggy', 'rain', 'clear'}. But better use refined dataset for foggy and rain for accurate annotation  
+
+if __name__ == '__main__':
+
+  args = parser_args()
+
+  #print('Called with args:')
+  #print(args)
+  
+  if(args.category == 'car'):
+    categories = {'car': 1}
+  else:
+    categories = {'person':1, 'rider': 2,'car': 3,'truck': 4, 'bus':5, 'train':6, 'motorcycle':7, 'bicycle':8}
+      
+
+  for (dirpath, dirnames, filenames) in walk('Cityscapes_Foggy'): 
+    split = dirpath.split('/')
+    if(len(split) == 4):
+      for f in filenames:
+    
+        sub_split = f.split('/')
+        imagename_split = sub_split[-1].split('_')
+        
+        if imagename_split[-1] == 'instanceIds.png' or imagename_split[-1] == 'labelIds.png':
+          continue
+  
+        imagename = imagename_split[0] + '_' + imagename_split[1] + '_' + imagename_split[2]  
+        
+        json_name = 'Cityscapes_Foggy/gtFine/'+split[2]+'/'+imagename_split[0]+'/'+imagename+'_gtFine_polygons.json'
+        f = open(json_name)
+        data = json.load(f)
+        bboxes = []
+        labels = []
+        for item in data['objects']:
+          if(item['label'] in categories.keys()):
+            
+            polygon_coods = np.array(item['polygon'])
+            x_min = np.min(polygon_coods[:,0])
+            x_max = np.max(polygon_coods[:,0])
+            y_min = np.min(polygon_coods[:,1])
+            y_max = np.max(polygon_coods[:,1])
+              
+            bboxes.append([x_min, y_min, x_max, y_max])
+            labels.append(categories[item['label']])
+            #labels.append(item['label'])
+            if(split[2] == 'train'):
+              train_obj_freq[item['label']] = train_obj_freq[item['label']] + 1
+            elif(split[2] == 'val'):
+              val_obj_freq[item['label']] = val_obj_freq[item['label']] + 1
+            else:
+              continue
+          
+        BoxesString = encode_boxes(bboxes)
+        LabelsString = encode_labels(labels)
+        
+        image_path = imagename_split[0] + '/' + imagename + '_leftImg8bit_foggy_beta_0.02.png'
+        new_row = {'image_name':image_path, 'BoxesString': BoxesString, 'LabelsString': LabelsString}  
+        
+        if(imagename_split[-1] == '0.02.png'):
+          if(split[2] == 'train'):
+            train_df = pd.concat([train_df, pd.DataFrame.from_records([new_row])], ignore_index = True)
+          elif(split[2] == 'val'):
+            val_df = pd.concat([val_df, pd.DataFrame.from_records([new_row])], ignore_index = True)
+          else:
+            continue
+        
+          
+train_df = train_df.reset_index(drop=True)
+val_df = val_df.reset_index(drop=True)
+
+train_df.to_csv('./Annots/cityscapes_foggy_train_'+args.category+'.csv')  
+val_df.to_csv('./Annots/cityscapes_foggy_val_'+args.category+'.csv')
+
+
+print(train_df.head())
+print(val_df.head())

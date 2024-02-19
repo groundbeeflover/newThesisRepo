@@ -137,6 +137,45 @@ class _InstanceDA(nn.Module):
         x=torch.sigmoid(self.classifer(x))
 
         return x
+
+class _InsClsPrime(nn.Module):
+    def __init__(self):
+        super(_InsClsPrime,self).__init__()
+        self.Conv1 = nn.Conv2d(256, 256, 1, stride=1)
+        self.Conv2 = nn.Conv2d(256, 256, 1, stride=1)
+        self.Conv3 = nn.Conv2d(256, 256, 1, stride=1)
+        self.relu = nn.ReLU()
+               
+
+    def forward(self,x):
+        y = []
+        y.append(self.relu(self.Conv1(grad_reverse(x[0]))))
+        y.append(self.relu(self.Conv2(grad_reverse(x[1]))))
+        y.append(self.relu(self.Conv3(grad_reverse(x[2]))))
+
+        return x
+
+class _InsCls(nn.Module):
+    def __init__(self, num_cls):
+        super(_InsCls,self).__init__()
+        self.num_cls = num_cls
+        self.dc_ip1 = nn.Linear(1024, 512)
+        self.dc_relu1 = nn.ReLU()
+        #self.dc_drop1 = nn.Dropout(p=0.5)
+
+        self.dc_ip2 = nn.Linear(512, 256)
+        self.dc_relu2 = nn.ReLU()
+        #self.dc_drop2 = nn.Dropout(p=0.5)
+
+        self.classifer=nn.Linear(256,self.num_cls)
+        
+
+    def forward(self,x):
+        x=self.dc_relu1(self.dc_ip1(x))
+        x=self.dc_ip2(x)
+        x=torch.sigmoid(self.classifer(x))
+
+        return x
         
 def collate_fn(batch):
     """
@@ -256,7 +295,7 @@ class DGYOLO(LightningModule):
           
           loss_dict['Cst_loss'] = self.reg_weights[2]*F.mse_loss(IDA_out, ExpImgDA_scores)
           
-          self.mode = 1
+          #self.mode = 1
               
       elif(self.mode == 1): #Without recording the gradients for detector, we need to update the weights for classifier weights
         

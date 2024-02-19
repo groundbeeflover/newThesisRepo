@@ -291,7 +291,7 @@ class DGFRCNN(LightningModule):
         self.exp = exp
         self.reg_weights = reg_weights
         
-        self.detector = fasterrcnn.fasterrcnn_resnet50_fpn(min_size=600, max_size=1200, num_classes=self.n_classes, pretrained=True, trainable_backbone_layers=3)
+        self.detector = fasterrcnn.fasterrcnn_resnet50_fpn(min_size=600, max_size=1200, num_classes=self.n_classes, pretrained=True, trainable_backbone_layers=2)
         self.ImageDA = _ImageDAFPN(256, self.num_domains)
         self.InsDA = _InstanceDA(self.num_domains)       
         self.InsCls = nn.ModuleList([_InsCls(n_classes) for i in range(self.num_domains)])
@@ -521,6 +521,10 @@ if __name__ == '__main__':
   if 'i' in args.source_domains.lower():
     domain_index = domain_index + 1
     tr_datasets.append(DrivingDataset('data/Annots/idd_train_all.csv', root='data/IDD/leftImg8bit/train/', transform=train_transform, domain=domain_index))
+  if 'f' in args.source_domains.lower():
+    domain_index = domain_index + 1
+    tr_datasets.append(DrivingDataset('data/Annots/cityscapes_foggy_train_all.csv', root='data/Cityscapes_Foggy/leftImg8bit/train/', transform=train_transform, domain=domain_index))
+
   
   tr_dataset = torch.utils.data.ConcatDataset(tr_datasets) # Combine all the source domains with their respective domain_index for training
     
@@ -539,6 +543,9 @@ if __name__ == '__main__':
   if 'i' in args.source_domains.lower():
     domain_index = domain_index + 1
     vl_datasets.append(DrivingDataset('data/Annots/idd_val_all.csv', root='data/IDD/leftImg8bit/val/', transform=val_transform, domain=domain_index))
+  if 'f' in args.source_domains.lower():
+    domain_index = domain_index + 1
+    vl_datasets.append(DrivingDataset('data/Annots/cityscapes_foggy_val_all.csv', root='data/Cityscapes_Foggy/leftImg8bit/val/', transform=train_transform, domain=domain_index))
   
   vl_dataset = torch.utils.data.ConcatDataset(vl_datasets) # Combine all the source domains with their respective domain_index for validation
   
@@ -557,6 +564,9 @@ if __name__ == '__main__':
   if 'i' in args.target_domains.lower():
     domain_index = domain_index + 1
     test_datasets.append(DrivingDataset('data/Annots/idd_val_all.csv', root='data/IDD/leftImg8bit/val/', transform=val_transform, domain=domain_index))
+  if 'f' in args.target_domains.lower():
+    domain_index = domain_index + 1
+    test_datasets.append(DrivingDataset('data/Annots/cityscapes_foggy_val_all.csv', root='data/Cityscapes_Foggy/leftImg8bit/val/', transform=train_transform, domain=domain_index))
   
   test_dataset = torch.utils.data.ConcatDataset(test_datasets) # Combine all the source domains with their respective domain_index for Testing
 

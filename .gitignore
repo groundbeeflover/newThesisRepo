@@ -4,6 +4,7 @@ data/ACDC/*
 data/Annots/*
 data/BDD100K/*
 data/Cityscapes/*
+data/Cityscapes_Foggy/*
 data/IDD/*
 weights
 weights/*
