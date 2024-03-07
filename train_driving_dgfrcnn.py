@@ -291,7 +291,7 @@ class DGFRCNN(LightningModule):
         self.exp = exp
         self.reg_weights = reg_weights
         
-        self.detector = fasterrcnn.fasterrcnn_resnet50_fpn(min_size=600, max_size=1200, num_classes=self.n_classes, pretrained=True, trainable_backbone_layers=2)
+        self.detector = fasterrcnn.fasterrcnn_resnet50_fpn(min_size=600, max_size=1200, num_classes=self.n_classes, pretrained=True, trainable_backbone_layers=3)
         self.ImageDA = _ImageDAFPN(256, self.num_domains)
         self.InsDA = _InstanceDA(self.num_domains)       
         self.InsCls = nn.ModuleList([_InsCls(n_classes) for i in range(self.num_domains)])
@@ -588,8 +588,8 @@ if __name__ == '__main__':
   early_stop_callback= EarlyStopping(monitor='val_acc', min_delta=0.00, patience=10, verbose=False, mode='max')
   checkpoint_callback = ModelCheckpoint(monitor='val_acc', dirpath=NET_FOLDER, filename=weights_file, mode='max')
   
-  trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], num_sanity_val_steps=2)
-  trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
+  #trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], num_sanity_val_steps=2)
+  #trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
   
   detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])
   trainer = Trainer(accelerator="gpu", max_epochs=0, num_sanity_val_steps=-1)

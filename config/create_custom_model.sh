@@ -1,6 +1,6 @@
 #!/bin/bash
 
-NUM_CLASSES=8
+NUM_CLASSES=5
 
 echo "
 [net]
@@ -10,8 +10,8 @@ echo "
 # Training
 batch=2
 subdivisions=1
-width=1280
-height=1280
+width=640
+height=640
 channels=3
 momentum=0.9
 decay=0.0005
@@ -791,4 +791,4 @@ jitter=.3
 ignore_thresh = .7
 truth_thresh = 1
 random=1
-" >> yolov3-custom-1280.cfg
+" >> yolov3-custom-640-urpc.cfg
