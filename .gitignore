@@ -7,7 +7,7 @@ data/Cityscapes/*
 data/Cityscapes_Foggy/*
 data/IDD/*
 data/URPC2019/*
-
+data/gwhd_2021/*
 weights
 weights/*
 temp
