@@ -109,11 +109,7 @@ class WheatDataset(Dataset):
               return np.zeros((0,4))
 
 
-
 #SIZE = 512
-#This is for analysing the influence of augmentation on the performance
-#All the individual augmentations are commented so as to get the true impact
-#of proposed regularisation terms
 train_transform = A.Compose(
         [
         ToTensorV2(p=1.0),
@@ -146,7 +142,7 @@ def collate_fn(batch):
         domain_labels.append(d)
     images = torch.stack(images, dim=0)
 
-    return images, targets, torch.tensor(domain_labels), orig_img
+    return images, targets, domain_labels, orig_img
 
 
 class GRLayer(Function):
@@ -164,26 +160,46 @@ class GRLayer(Function):
 
 def grad_reverse(x):
     return GRLayer.apply(x)
-    
+
+
+class _ImageDA(nn.Module):
+    def __init__(self,num_domains):
+        super(_ImageDA,self).__init__()
+        self.num_domains = num_domains
+        self.Conv1 = nn.Conv2d(2048, 2048, kernel_size=3, stride=4)
+        self.Conv2 = nn.Conv2d(2048, 2048, kernel_size=3, stride=4)
+        self.maxpool = nn.MaxPool2d(2)
+        self.flatten = nn.Flatten()
+        self.linear1 = nn.Linear(2048, 512)
+        self.linear2 = nn.Linear(512, 128)
+        self.linear3 = nn.Linear(128, self.num_domains)
+        self.reLu=nn.ReLU(inplace=False)
+        
+    def forward(self,x):
+        x=grad_reverse(x)
+        x=self.reLu(self.Conv1(x))
+        x=self.reLu(self.Conv2(x))
+        x=self.reLu(self.maxpool(x))
+        x=self.flatten(x)
+        x=self.reLu(self.linear1(x))
+        x=self.reLu(self.linear2(x))
+        x=torch.sigmoid(self.linear3(x))
+        
+        return x
+   
 class _InstanceDA(nn.Module):
     def __init__(self, num_domains):
         super(_InstanceDA,self).__init__()
         self.num_domains = num_domains
-        self.dc_ip1 = nn.Linear(1024, 512)
+        self.dc_ip1 = nn.Linear(256, 128)
         self.dc_relu1 = nn.ReLU()
-        #self.dc_drop1 = nn.Dropout(p=0.5)
 
-        self.dc_ip2 = nn.Linear(512, 256)
-        self.dc_relu2 = nn.ReLU()
-        #self.dc_drop2 = nn.Dropout(p=0.5)
-
-        self.classifer=nn.Linear(256,self.num_domains)
+        self.classifer=nn.Linear(128,self.num_domains)
         
 
     def forward(self,x):
         x=grad_reverse(x)
         x=self.dc_relu1(self.dc_ip1(x))
-        x=self.dc_ip2(x)
         x=torch.sigmoid(self.classifer(x))
 
         return x
@@ -192,15 +208,15 @@ class _InsClsPrime(nn.Module):
     def __init__(self, num_cls):
         super(_InsClsPrime,self).__init__()
         self.num_cls = num_cls
-        self.dc_ip1 = nn.Linear(1024, 512)
+        self.dc_ip1 = nn.Linear(256, 128)
         self.dc_relu1 = nn.ReLU()
         #self.dc_drop1 = nn.Dropout(p=0.5)
 
-        self.dc_ip2 = nn.Linear(512, 256)
+        self.dc_ip2 = nn.Linear(128, 64)
         self.dc_relu2 = nn.ReLU()
         #self.dc_drop2 = nn.Dropout(p=0.5)
 
-        self.classifer=nn.Linear(256,self.num_cls)
+        self.classifer=nn.Linear(64,self.num_cls)
         
 
     def forward(self,x):
@@ -215,15 +231,15 @@ class _InsCls(nn.Module):
     def __init__(self, num_cls):
         super(_InsCls,self).__init__()
         self.num_cls = num_cls
-        self.dc_ip1 = nn.Linear(1024, 512)
+        self.dc_ip1 = nn.Linear(256, 128)
         self.dc_relu1 = nn.ReLU()
         #self.dc_drop1 = nn.Dropout(p=0.5)
 
-        self.dc_ip2 = nn.Linear(512, 256)
+        self.dc_ip2 = nn.Linear(128, 64)
         self.dc_relu2 = nn.ReLU()
         #self.dc_drop2 = nn.Dropout(p=0.5)
 
-        self.classifer=nn.Linear(256,self.num_cls)
+        self.classifer=nn.Linear(64,self.num_cls)
         
 
     def forward(self,x):
@@ -232,75 +248,47 @@ class _InsCls(nn.Module):
         x=torch.sigmoid(self.classifer(x))
 
         return x
-                     
-class _ImageDA(nn.Module):
-    def __init__(self,dim,num_domains):
-        super(_ImageDA,self).__init__()
-        self.dim=dim  # feat layer          256*H*W for vgg16
-        self.num_domains = num_domains
-        self.Conv1 = nn.Conv2d(self.dim, 256, kernel_size=3, stride=4)
-        self.Conv2 = nn.Conv2d(256, 256, kernel_size=3, stride=4)
-        self.Conv3 = nn.Conv2d(256, 256, kernel_size=3, stride=4)
-        self.Conv4 = nn.Conv2d(256, 256, kernel_size=3, stride=4)
-        self.flatten = nn.Flatten()
-        self.linear1 = nn.Linear(256, 128)
-        self.linear2 = nn.Linear(128, self.num_domains)
-        self.reLu=nn.ReLU(inplace=False)
-        
 
- 
-        
-    def forward(self,x):
-        x=grad_reverse(x)
-        x=self.reLu(self.Conv1(x))
-        x=self.reLu(self.Conv2(x))
-        x=self.reLu(self.Conv3(x))
-        x=self.reLu(self.Conv4(x))
-        x=self.flatten(x)
-        x=self.reLu(self.linear1(x))
-        x=torch.sigmoid(self.linear2(x))
-        
-        return x
-
-
-
-import fasterrcnn
-class DGFRCNN(LightningModule):
+import fcos
+class DGFCOS(LightningModule):
     def __init__(self, n_classes, batchsize, exp, reg_weights):
-        super(DGFRCNN, self).__init__()
-        
-        self.detector = fasterrcnn.fasterrcnn_resnet50_fpn(min_size=1024, max_size=1024, pretrained_backbone=True) 
-        in_features = self.detector.roi_heads.box_predictor.cls_score.in_features
-        self.detector.roi_heads.box_predictor = FastRCNNPredictor(in_features, n_classes)
+        super(DGFCOS, self).__init__()
         self.n_classes = n_classes
         self.batchsize = batchsize
         self.exp = exp
         self.reg_weights = reg_weights
         self.num_domains = 18
+                
+        self.detector = fcos.fcos_resnet50_fpn(min_size=1024, max_size=1024, num_classes=self.n_classes, pretrained_backbone=True)
 	
-        self.ImageDA = _ImageDA(256, self.num_domains)
+        self.ImageDA = _ImageDA(self.num_domains)
         self.InsDA = _InstanceDA(self.num_domains)       
         self.InsCls = nn.ModuleList([_InsCls(self.n_classes) for i in range(self.num_domains)])
         self.InsClsPrime = nn.ModuleList([_InsClsPrime(self.n_classes) for i in range(self.num_domains)])
-
+        
         self.metric = MeanAveragePrecision(iou_type="bbox", class_metrics=True, iou_thresholds = [0.5])
         self.base_lr = 1e-4 #Original base lr is 1e-4
         self.momentum = 0.9
         self.weight_decay=0.0001
-
-        # Tapping the backbone features and region proposal features and its labels
-        self.detector.backbone.register_forward_hook(self.store_backbone_out)
-        self.detector.roi_heads.box_head.register_forward_hook(self.store_ins_features)
+        
+        self.detector.backbone.body.register_forward_hook(self.store_backbone_out)        
+        self.detector.head.register_forward_hook(self.store_head_input)  #For instance level features
         
         self.mode = 0
-    
-    def store_ins_features(self, module, input1, output):
-      self.box_features = output
-      self.box_labels = input1[1] #Torch tensor of size 512
-      
-            
+        
     def store_backbone_out(self, module, input1, output):
-      self.base_feat = output
+      self.base_feat = output['2']  #Output is a dict at three levels. We consider the top level feature as representative of image level feature
+    
+    def store_head_input(self, module, input1, output):
+      
+      temp0 = torch.reshape(input1[0][0], (input1[0][0].shape[0], input1[0][0].shape[1], input1[0][0].shape[2]*input1[0][0].shape[3]))
+      temp1 = torch.reshape(input1[0][1], (input1[0][1].shape[0], input1[0][1].shape[1], input1[0][1].shape[2]*input1[0][1].shape[3]))
+      temp2 = torch.reshape(input1[0][2], (input1[0][2].shape[0], input1[0][2].shape[1], input1[0][2].shape[2]*input1[0][2].shape[3]))
+      temp3 = torch.reshape(input1[0][3], (input1[0][3].shape[0], input1[0][3].shape[1], input1[0][3].shape[2]*input1[0][3].shape[3]))
+      temp4 = torch.reshape(input1[0][4], (input1[0][4].shape[0], input1[0][4].shape[1], input1[0][4].shape[2]*input1[0][4].shape[3]))
+      
+      self.ins_feat = torch.cat((temp0, temp1, temp2, temp3, temp4), -1).permute(0, 2, 1)
+      
       
     def forward(self, imgs,targets=None):
       # Torchvision FasterRCNN returns the loss during training 
@@ -310,7 +298,7 @@ class DGFRCNN(LightningModule):
     
     def configure_optimizers(self):
       
-      optimizer = torch.optim.Adam([{'params': self.detector.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay },
+      optimizer = torch.optim.Adam([{'params': self.detector.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay},
                                     {'params': self.ImageDA.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay },
                                     {'params': self.InsDA.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay },
                                     {'params': self.InsCls.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay },
@@ -322,59 +310,51 @@ class DGFRCNN(LightningModule):
       
       
       return [optimizer], [lr_scheduler]
-
-      
+            
     def training_step(self, batch, batch_idx):
       
-      imgs = list(image.to(device = self.device) for image in batch[0]) 
-      #imgs = list(image for image in batch[0]) 
+      imgs = list(image.cuda() for image in batch[0]) 
+      
 
       targets = []
       for boxes, domain in zip(batch[1], batch[2]):
         target= {}
-        target["boxes"] = boxes.float().to(device = self.device)
-        target["labels"] = torch.ones(len(target["boxes"])).long().to(device = self.device)
+        target["boxes"] = boxes.float().cuda()
+        target["labels"] = torch.ones(len(target["boxes"])).long().cuda()
         targets.append(target)
-
-      # fasterrcnn takes both images and targets for training, returns
-      #Detection using source images
       
       if(self.mode == 0):
-        
         loss_dict = {}
-        detections = self.detector(imgs, targets)
-        loss = sum([loss for detection in detections for loss in detection['losses'].values()])
+ 
+        temp_dict = self.detector(imgs, targets)       
+        loss_dict['detection'] = temp_dict['classification'] + temp_dict['bbox_regression'] + temp_dict['bbox_ctrness']
         
-        loss_dict['detection_loss'] = loss
+        if(self.exp == 'dg'):        
+                   
+            ImgDA_scores  = self.ImageDA(self.base_feat)
+            loss_dict['DA_img_loss'] = self.reg_weights[0]*F.cross_entropy(ImgDA_scores, torch.tensor(batch[2]).cuda().long())
+                    
+            IDA_out = self.InsDA(self.ins_feat)
+            loss_dict['DA_ins_loss'] = self.reg_weights[1]*F.cross_entropy(IDA_out.permute(0,2,1), torch.tensor(batch[2]).repeat(IDA_out.shape[1],1).permute(1,0).cuda())
+            
+            loss_dict['Cst_loss'] = self.reg_weights[2]*F.mse_loss(IDA_out, ImgDA_scores.unsqueeze(dim=-1).repeat(1, 1, IDA_out.shape[1]).permute(0, 2, 1))
+            self.mode = 1
+            
+        loss = sum(loss for loss in loss_dict.values())  
+    
         
-        
-        if(self.exp == 'dg'):
-          ImgDA_scores = self.ImageDA(self.base_feat['0'])
-          loss_dict['DA_img_loss'] = self.reg_weights[0]*F.cross_entropy(ImgDA_scores, batch[2].to(device=self.device))
-          IDA_out = self.InsDA(self.box_features)
-          rep_factor = int(IDA_out.shape[0]/self.batchsize)
-          ins_labels = batch[2].reshape(self.batchsize,1).repeat(1, rep_factor).reshape(IDA_out.shape[0])      
-          loss_dict['DA_ins_loss'] = self.reg_weights[1]*F.cross_entropy(IDA_out, ins_labels.to(device=self.device))
-          ExpImgDA_scores =ImgDA_scores.repeat(1, rep_factor).reshape(IDA_out.shape[0], self.num_domains)
-          loss_dict['Cst_loss'] = self.reg_weights[2]*F.mse_loss(IDA_out, ExpImgDA_scores)       
-          self.mode = 1
-        
-        #self.mode = 1  
-        loss = sum(loss1 for loss1 in loss_dict.values())       
-	                 
       elif(self.mode == 1): #Without recording the gradients for detector, we need to update the weights for classifier weights
         loss_dict = {}
         loss = []
 
-        
         for index in range(len(self.InsCls)):
           for param in self.InsCls[index].parameters(): param.requires_grad = True
 
         for index in range(len(imgs)):
           with torch.no_grad():
-            _ = self.detector([imgs[index]], [targets[index]])
-          cls_scores = self.InsCls[batch[2][index].item()](self.box_features)
-          loss.append(F.cross_entropy(cls_scores, self.box_labels[0])) 
+            temp_dict = self.detector([imgs[index]], [targets[index]])
+          cls_logits = self.InsCls[batch[2][index].item()](self.ins_feat)
+          loss.append(F.cross_entropy(cls_logits, temp_dict['gt_classes'], reduction="mean")) 
 
         loss_dict['cls'] = self.reg_weights[4]*(torch.mean(torch.stack(loss)))
         loss = sum(loss for loss in loss_dict.values())
@@ -386,9 +366,9 @@ class DGFRCNN(LightningModule):
         loss = []
     
         for index in range(len(imgs)):
-          _ = self.detector([imgs[index]], [targets[index]])
-          cls_scores = self.InsClsPrime[batch[2][index].item()](self.box_features)
-          loss.append(F.cross_entropy(cls_scores, self.box_labels[0]))
+          temp_dict = self.detector([imgs[index]], [targets[index]])
+          cls_logits = self.InsClsPrime[batch[2][index].item()](self.ins_feat)
+          loss.append(F.cross_entropy(cls_logits, temp_dict['gt_classes'], reduction="mean")) 
   	  
         loss_dict['cls_prime'] = self.reg_weights[3]*(torch.mean(torch.stack(loss)))
         loss = sum(loss for loss in loss_dict.values())
@@ -405,21 +385,20 @@ class DGFRCNN(LightningModule):
           for param in self.InsCls[index].parameters(): param.requires_grad = False
         
         for index in range(len(imgs)):
-          _ = self.detector([imgs[index]], [targets[index]])
+          temp_dict = self.detector([imgs[index]], [targets[index]])
           temp = []
           for i in range(len(self.InsCls)):
             if(i != batch[2][index].item()):
-              cls_scores = self.InsCls[i](self.box_features)
-              temp.append(cls_scores)
-              loss.append(F.cross_entropy(cls_scores, self.box_labels[0]))
-          consis_loss.append(torch.mean(torch.abs(torch.stack(temp, dim=0) - torch.mean(torch.stack(temp, dim=0), dim=0))))
+              cls_logits = self.InsCls[i](self.ins_feat)
+              loss.append(F.cross_entropy(cls_logits, temp_dict['gt_classes'], reduction="mean")) 
 
-        loss_dict['cls'] = self.reg_weights[4]*(torch.mean(torch.stack(loss)))# + torch.mean(torch.stack(consis_loss)))
+        loss_dict['cls'] = self.reg_weights[4]*(torch.mean(torch.stack(loss)))
         loss = sum(loss for loss in loss_dict.values())
         
         self.mode = 0
-
-      return {"loss": loss}#, "log": torch.stack(temp_loss).detach().cpu()}
+       
+ 	 
+      return {"loss": loss}
 
     def validation_step(self, batch, batch_idx):
       
@@ -452,9 +431,9 @@ class DGFRCNN(LightningModule):
       print(metrics['map_per_class'], metrics['map_50'])
       self.metric.reset()
       
-   
+      
 def parser_args():
-  parser = argparse.ArgumentParser(description='DGFRCNN Main Experiments')
+  parser = argparse.ArgumentParser(description='DGFCOS Main Experiments')
   parser.add_argument('--exp', dest='exp',
                       help='non_dg or dg',
                       default='non_dg', type=str)
@@ -471,8 +450,7 @@ def parser_args():
                        dest='reg_weights', help='Regularisation constats', type=float)
                       
   return parser.parse_args()
-  
-  
+
 if __name__ == '__main__':
 
   args = parser_args()
@@ -493,7 +471,7 @@ if __name__ == '__main__':
   test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False,  collate_fn=collate_fn)
   
   # Instantiating the detector
-  detector = DGFRCNN(2, 8, args.exp, args.reg_weights) # Num classes + 1 and batch_size
+  detector = DGFCOS(2, 8, args.exp, args.reg_weights) # Num classes + 1 and batch_size
 
   if os.path.exists(NET_FOLDER+'/'+weights_file+'.ckpt'): 
     detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])
@@ -511,5 +489,4 @@ if __name__ == '__main__':
   detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])
   trainer = Trainer(accelerator="gpu", max_epochs=0, num_sanity_val_steps=-1)
   trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=test_dataloader)          
-
 
