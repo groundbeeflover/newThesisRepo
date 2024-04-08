@@ -31,13 +31,6 @@ from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import Callback, ModelCheckpoint
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 
-
-SEED=42
-torch.manual_seed(SEED)
-np.random.seed(SEED)
-random.seed(SEED)
-seed_everything(SEED)
-
 class WheatDataset(Dataset):
     """A dataset example for GWC 2021 competition."""
 
@@ -109,40 +102,26 @@ class WheatDataset(Dataset):
               return np.zeros((0,4))
 
 
+SEED=42
+torch.manual_seed(SEED)
+np.random.seed(SEED)
+random.seed(SEED)
+seed_everything(SEED)
+
 
 train_transform = A.Compose(
         [
+        A.Resize(height=640, width=640, p=1.0),     
         ToTensorV2(p=1.0),
         ], 
         p=1.0, 
-        bbox_params=A.BboxParams(format='pascal_voc',label_fields=['class_labels'],min_area=20)
+        bbox_params=A.BboxParams(format='pascal_voc',label_fields=['class_labels'])
     )
 
-
-valid_transform = A.Compose([
+val_transform = A.Compose([
+    A.Resize(height=640, width=640, p=1.0),
     ToTensorV2(p=1.0),
-],p=1.0,bbox_params=A.BboxParams(format='pascal_voc',label_fields=['class_labels'],min_area=20))
-
-
-
-def collate_fn(batch):
-    """
-    Since each image may have a different number of objects, we need a collate function (to be passed to the DataLoader).
-
-    """
-
-    images = list()
-    targets=list()
-    orig_img = list()
-    domain_labels = list()
-    for i, t, d, io in batch:
-        images.append(i)
-        targets.append(t)
-        orig_img.append(io)
-        domain_labels.append(d)
-    images = torch.stack(images, dim=0)
-
-    return images, targets, domain_labels, orig_img
+],p=1.0,bbox_params=A.BboxParams(format='pascal_voc',label_fields=['class_labels']))
 
 
 class GRLayer(Function):
@@ -160,54 +139,48 @@ class GRLayer(Function):
 
 def grad_reverse(x):
     return GRLayer.apply(x)
-
+    
 
 class _ImageDA(nn.Module):
-    def __init__(self,num_domains):
+    def __init__(self,dim,num_domains):
         super(_ImageDA,self).__init__()
+        self.dim=dim  # feat layer 256*H*W for vgg16
         self.num_domains = num_domains
-        self.Conv1 = nn.Conv2d(2048, 2048, kernel_size=3, stride=4)
-        self.Conv2 = nn.Conv2d(2048, 2048, kernel_size=3, stride=4)
-        self.maxpool = nn.MaxPool2d(2)
+        self.Conv1 = nn.Conv2d(256, 256, 3, stride=4)
+        self.Conv2 = nn.Conv2d(256, 256, 3, stride=4)
+        self.Conv3 = nn.Conv2d(256, 256, 3, stride=4)
+        #self.Conv4 = nn.Conv2d(256, 256, 2, stride=1)
+        
         self.flatten = nn.Flatten()
-        self.linear1 = nn.Linear(2048, 512)
-        self.linear2 = nn.Linear(512, 128)
-        self.linear3 = nn.Linear(128, self.num_domains)
+        self.linear1 = nn.Linear(256, 128)
+        self.linear2 = nn.Linear(128, self.num_domains)
         self.reLu=nn.ReLU(inplace=False)
         
+
+        torch.nn.init.normal_(self.Conv1.weight, std=0.001)
+        torch.nn.init.constant_(self.Conv1.bias, 0)
+        torch.nn.init.normal_(self.Conv2.weight, std=0.001)
+        torch.nn.init.constant_(self.Conv2.bias, 0)
+        torch.nn.init.normal_(self.Conv3.weight, std=0.001)
+        torch.nn.init.constant_(self.Conv3.bias, 0)
+        #torch.nn.init.normal_(self.Conv4.weight, std=0.001)
+        #torch.nn.init.constant_(self.Conv4.bias, 0)
     def forward(self,x):
         x=grad_reverse(x)
         x=self.reLu(self.Conv1(x))
         x=self.reLu(self.Conv2(x))
-        x=self.reLu(self.maxpool(x))
+        x=self.reLu(self.Conv3(x))
+        #x=self.reLu(self.Conv4(x))
         x=self.flatten(x)
         x=self.reLu(self.linear1(x))
-        x=self.reLu(self.linear2(x))
-        x=torch.sigmoid(self.linear3(x))
+        x=F.sigmoid(self.linear2(x))
         
         return x
-   
+
 class _InstanceDA(nn.Module):
     def __init__(self, num_domains):
         super(_InstanceDA,self).__init__()
         self.num_domains = num_domains
-        self.dc_ip1 = nn.Linear(256, 128)
-        self.dc_relu1 = nn.ReLU()
-
-        self.classifer=nn.Linear(128,self.num_domains)
-        
-
-    def forward(self,x):
-        x=grad_reverse(x)
-        x=self.dc_relu1(self.dc_ip1(x))
-        x=torch.sigmoid(self.classifer(x))
-
-        return x
-
-class _InsClsPrime(nn.Module):
-    def __init__(self, num_cls):
-        super(_InsClsPrime,self).__init__()
-        self.num_cls = num_cls
         self.dc_ip1 = nn.Linear(256, 128)
         self.dc_relu1 = nn.ReLU()
         #self.dc_drop1 = nn.Dropout(p=0.5)
@@ -216,7 +189,7 @@ class _InsClsPrime(nn.Module):
         self.dc_relu2 = nn.ReLU()
         #self.dc_drop2 = nn.Dropout(p=0.5)
 
-        self.classifer=nn.Linear(64,self.num_cls)
+        self.classifer=nn.Linear(64,self.num_domains)
         
 
     def forward(self,x):
@@ -224,6 +197,23 @@ class _InsClsPrime(nn.Module):
         x=self.dc_relu1(self.dc_ip1(x))
         x=self.dc_ip2(x)
         x=torch.sigmoid(self.classifer(x))
+
+        return x
+
+class _InsClsPrime(nn.Module):
+    def __init__(self):
+        super(_InsClsPrime,self).__init__()
+        self.Conv1 = nn.Conv2d(256, 256, 1, stride=1)
+        self.Conv2 = nn.Conv2d(256, 256, 1, stride=1)
+        self.Conv3 = nn.Conv2d(256, 256, 1, stride=1)
+        self.relu = nn.ReLU()
+               
+
+    def forward(self,x):
+        y = []
+        y.append(self.relu(self.Conv1(grad_reverse(x[0]))))
+        y.append(self.relu(self.Conv2(grad_reverse(x[1]))))
+        y.append(self.relu(self.Conv3(grad_reverse(x[2]))))
 
         return x
 
@@ -231,15 +221,15 @@ class _InsCls(nn.Module):
     def __init__(self, num_cls):
         super(_InsCls,self).__init__()
         self.num_cls = num_cls
-        self.dc_ip1 = nn.Linear(256, 128)
+        self.dc_ip1 = nn.Linear(1024, 512)
         self.dc_relu1 = nn.ReLU()
         #self.dc_drop1 = nn.Dropout(p=0.5)
 
-        self.dc_ip2 = nn.Linear(128, 64)
+        self.dc_ip2 = nn.Linear(512, 256)
         self.dc_relu2 = nn.ReLU()
         #self.dc_drop2 = nn.Dropout(p=0.5)
 
-        self.classifer=nn.Linear(64,self.num_cls)
+        self.classifer=nn.Linear(256,self.num_cls)
         
 
     def forward(self,x):
@@ -248,129 +238,163 @@ class _InsCls(nn.Module):
         x=torch.sigmoid(self.classifer(x))
 
         return x
+        
+def collate_fn(batch):
+    """
+    Since each image may have a different number of objects, we need a collate function (to be passed to the DataLoader).
 
-import fcos
-class DGFCOS(LightningModule):
-    def __init__(self, n_classes, batchsize, exp, reg_weights):
-        super(DGFCOS, self).__init__()
+    """
+
+    images = list()
+    targets=list()
+    orig_img = list()
+    domain_labels = list()
+    for i, t, d, io in batch:
+        images.append(i)
+        targets.append(t)
+        orig_img.append(io)
+        domain_labels.append(d)
+    images = torch.stack(images, dim=0)
+
+    return images, targets, torch.tensor(domain_labels), orig_img
+
+    
+
+from models.pytorchyolo.models import Darknet  
+from models.pytorchyolo.utils.loss import compute_loss
+from models.pytorchyolo.utils.utils import non_max_suppression
+
+class DGYOLO(LightningModule):
+    def __init__(self,n_classes, batch_size, exp, reg_weights):
+        super(DGYOLO, self).__init__()
         self.n_classes = n_classes
-        self.batchsize = batchsize
+        self.num_domains = 18
+        self.batch_size = batch_size
         self.exp = exp
         self.reg_weights = reg_weights
-        self.num_domains = 18
-                
-        self.detector = fcos.fcos_resnet50_fpn(min_size=1024, max_size=1024, num_classes=self.n_classes, pretrained_backbone=True)
-	
-        self.ImageDA = _ImageDA(self.num_domains)
-        self.InsDA = _InstanceDA(self.num_domains)       
-        self.InsCls = nn.ModuleList([_InsCls(self.n_classes) for i in range(self.num_domains)])
-        self.InsClsPrime = nn.ModuleList([_InsClsPrime(self.n_classes) for i in range(self.num_domains)])
         
-        self.metric = MeanAveragePrecision(iou_type="bbox", class_metrics=True, iou_thresholds = [0.5])
-        self.base_lr = 1e-4 #Original base lr is 1e-4
+        self.detector = Darknet('./config/yolov3-custom-640-gwhd.cfg')        
+        self.detector.load_darknet_weights('./weights/darknet53.conv.74')
+        self.ImageDA = _ImageDA(256, self.num_domains)
+        self.InsDA = _InstanceDA(self.num_domains)
+        
+        
+        self.base_lr = 0.01
         self.momentum = 0.9
-        self.weight_decay=0.0001
+        self.weight_decay=0.0005
         
-        self.detector.backbone.body.register_forward_hook(self.store_backbone_out)        
-        self.detector.head.register_forward_hook(self.store_head_input)  #For instance level features
-        
+        self.best_val_acc = 0
+        self.log('val_acc', self.best_val_acc)
+        self.metric = MeanAveragePrecision(iou_type="bbox", class_metrics=True, iou_thresholds = [0.5])        
+                
         self.mode = 0
-        
-    def store_backbone_out(self, module, input1, output):
-      self.base_feat = output['2']  #Output is a dict at three levels. We consider the top level feature as representative of image level feature
     
-    def store_head_input(self, module, input1, output):
-      
-      temp0 = torch.reshape(input1[0][0], (input1[0][0].shape[0], input1[0][0].shape[1], input1[0][0].shape[2]*input1[0][0].shape[3]))
-      temp1 = torch.reshape(input1[0][1], (input1[0][1].shape[0], input1[0][1].shape[1], input1[0][1].shape[2]*input1[0][1].shape[3]))
-      temp2 = torch.reshape(input1[0][2], (input1[0][2].shape[0], input1[0][2].shape[1], input1[0][2].shape[2]*input1[0][2].shape[3]))
-      temp3 = torch.reshape(input1[0][3], (input1[0][3].shape[0], input1[0][3].shape[1], input1[0][3].shape[2]*input1[0][3].shape[3]))
-      temp4 = torch.reshape(input1[0][4], (input1[0][4].shape[0], input1[0][4].shape[1], input1[0][4].shape[2]*input1[0][4].shape[3]))
-      
-      self.ins_feat = torch.cat((temp0, temp1, temp2, temp3, temp4), -1).permute(0, 2, 1)
-      
-      
     def forward(self, imgs,targets=None):
-      # Torchvision FasterRCNN returns the loss during training 
-      # and the boxes during eval
+      
       self.detector.eval()
       return self.detector(imgs)
     
     def configure_optimizers(self):
       
       optimizer = torch.optim.Adam([{'params': self.detector.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay},
-                                    {'params': self.ImageDA.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay },
-                                    {'params': self.InsDA.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay },
-                                    {'params': self.InsCls.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay },
-                                    {'params': self.InsClsPrime.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay}
-                                      ],) 
+                                   {'params': self.ImageDA.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay },
+                                   {'params': self.InsDA.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay}]) 
       
       lr_scheduler = {'scheduler': torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', factor=0.1, patience=5, threshold=0.0001, min_lr=0, eps=1e-08),
                       'monitor': 'val_acc'}
       
       
       return [optimizer], [lr_scheduler]
-            
+      
+     
+      
     def training_step(self, batch, batch_idx):
       
-      imgs = list(image.cuda() for image in batch[0]) 
+      #imgs = list(image.cuda() for image in batch[0]) 
+      imgs = batch[0].cuda()
       
-
+      
       targets = []
-      for boxes, domain in zip(batch[1], batch[2]):
-        target= {}
-        target["boxes"] = boxes.float().cuda()
-        target["labels"] = torch.ones(len(target["boxes"])).long().cuda()
+      for index, (boxes, labels) in enumerate(zip(batch[1], batch[2])):
+        target = torch.zeros(boxes.shape[0], 6)
+        boxes[:, 2] = boxes[:, 2] - boxes[:, 0] #w = xmax - xmin
+        boxes[:, 3] = boxes[:, 3] - boxes[:, 1] #h = ymax - ymin
+        boxes[:, 0] = boxes[:, 0] + 0.5*boxes[:, 2] # xc = xmin + 0.5*w
+        boxes[:, 1] = boxes[:, 1] + 0.5*boxes[:, 3] # yc = ymin + 0.5*h
+        target[:, 2:] = boxes / 640.0 # Yolo bboxes are normalised between 0 and 1
+        target[:, 1] = torch.zeros(len(boxes)).long().to(device = self.device)
+        target[:, 0] = index # Yolo uses the sample index in the first column
         targets.append(target)
       
-      if(self.mode == 0):
+      targets = torch.cat(targets, dim=0).cuda()
+
+      if self.mode == 0:
+        
         loss_dict = {}
- 
-        temp_dict = self.detector(imgs, targets)       
-        loss_dict['detection'] = temp_dict['classification'] + temp_dict['bbox_regression'] + temp_dict['bbox_ctrness']
+
+        yolo_outputs, backbone_features, ins_feats = self.detector(imgs)
+        loss, loss_components = compute_loss(yolo_outputs, targets, self.detector)
+        loss_dict['detection_loss'] = loss
         
-        if(self.exp == 'dg'):        
-                   
-            ImgDA_scores  = self.ImageDA(self.base_feat)
-            loss_dict['DA_img_loss'] = self.reg_weights[0]*F.cross_entropy(ImgDA_scores, torch.tensor(batch[2]).cuda().long())
-                    
-            IDA_out = self.InsDA(self.ins_feat)
-            loss_dict['DA_ins_loss'] = self.reg_weights[1]*F.cross_entropy(IDA_out.permute(0,2,1), torch.tensor(batch[2]).repeat(IDA_out.shape[1],1).permute(1,0).cuda())
-            
-            loss_dict['Cst_loss'] = self.reg_weights[2]*F.mse_loss(IDA_out, ImgDA_scores.unsqueeze(dim=-1).repeat(1, 1, IDA_out.shape[1]).permute(0, 2, 1))
-            self.mode = 1
-            
-        loss = sum(loss for loss in loss_dict.values())  
-    
-        
+        if(self.exp == 'dg'):
+          
+          ImgDA_scores = self.ImageDA(backbone_features)
+          loss_dict['DA_img_loss'] = self.reg_weights[0]*F.cross_entropy(ImgDA_scores, batch[2])
+          
+          ins_feat = ins_feats[-1]
+          bs, c, y, x = ins_feat.shape
+          ins_feat = ins_feat.view(bs, c, y*x).permute(0, 2, 1)
+          IDA_out = self.InsDA(ins_feat)
+          rep_factor = IDA_out.shape[1]
+          ins_domain_labels = batch[2].reshape(self.batch_size,1).repeat(1, rep_factor)
+          loss_dict['DA_ins_loss'] = self.reg_weights[1]*F.cross_entropy(IDA_out.permute(0, 2, 1), ins_domain_labels.to(device=0))
+          
+          
+          ExpImgDA_scores = ImgDA_scores.clone().unsqueeze_(1).repeat(1, rep_factor, 1)
+          
+          loss_dict['Cst_loss'] = self.reg_weights[2]*F.mse_loss(IDA_out, ExpImgDA_scores)
+          
+          self.mode = 1
+              
       elif(self.mode == 1): #Without recording the gradients for detector, we need to update the weights for classifier weights
+        
         loss_dict = {}
         loss = []
-
-        for index in range(len(self.InsCls)):
-          for param in self.InsCls[index].parameters(): param.requires_grad = True
-
+        #for index in range(self.num_domains):
+          #for param in self.InsCls[index].parameters(): param.requires_grad = True
+         
         for index in range(len(imgs)):
           with torch.no_grad():
-            temp_dict = self.detector([imgs[index]], [targets[index]])
-          cls_logits = self.InsCls[batch[2][index].item()](self.ins_feat)
-          loss.append(F.cross_entropy(cls_logits, temp_dict['gt_classes'], reduction="mean")) 
+            yolo_outputs, backbone_features, ins_feats = self.detector(imgs[index].unsqueeze(dim=0))
+          yolo_outputs[0].requires_grad = True
+          yolo_outputs[1].requires_grad = True
+          yolo_outputs[2].requires_grad = True
+          targets_indi = targets[targets[:, 0] == index]
+          targets_indi[:, 0] = 0
+          loss_indi, loss_components = compute_loss(yolo_outputs, targets_indi, self.detector)
+          
+          loss.append(loss_indi) 
 
-        loss_dict['cls'] = self.reg_weights[4]*(torch.mean(torch.stack(loss)))
+        loss_dict['cls'] = self.reg_weights[4]*(torch.sum(torch.stack(loss)))
         loss = sum(loss for loss in loss_dict.values())
 
         self.mode = 2
         
       elif(self.mode == 2): #Only the GRL Classification should influence the updates but here we need to update the detector weights as well
+      
         loss_dict = {}
         loss = []
     
         for index in range(len(imgs)):
-          temp_dict = self.detector([imgs[index]], [targets[index]])
-          cls_logits = self.InsClsPrime[batch[2][index].item()](self.ins_feat)
-          loss.append(F.cross_entropy(cls_logits, temp_dict['gt_classes'], reduction="mean")) 
+          yolo_outputs, _, ins_feats = self.detector(imgs[index].unsqueeze(dim=0))
+          for index_y in range(len(yolo_outputs)):
+            yolo_outputs[index_y] = grad_reverse(yolo_outputs[index_y])
+          targets_indi = targets[targets[:, 0] == index]
+          targets_indi[:, 0] = 0
+          loss_indi, loss_components = compute_loss(yolo_outputs, targets_indi, self.detector)
+          loss.append(loss_indi)
   	  
-        loss_dict['cls_prime'] = self.reg_weights[3]*(torch.mean(torch.stack(loss)))
+        loss_dict['cls_prime'] = self.reg_weights[3]*(torch.sum(torch.stack(loss)))
         loss = sum(loss for loss in loss_dict.values())
 
         self.mode = 3
@@ -379,49 +403,59 @@ class DGFCOS(LightningModule):
       
         loss_dict = {}
         loss = []
-        consis_loss = []
         
-        for index in range(len(self.InsCls)):
-          for param in self.InsCls[index].parameters(): param.requires_grad = False
+        #for index in range(self.num_domains):
+          #for param in self.InsCls[index].parameters(): param.requires_grad = False
         
         for index in range(len(imgs)):
-          temp_dict = self.detector([imgs[index]], [targets[index]])
-          temp = []
-          for i in range(len(self.InsCls)):
+          yolo_outputs, backbone_features, ins_feats = self.detector(imgs[index].unsqueeze(dim=0))
+          
+          for i in range(self.num_domains):
             if(i != batch[2][index].item()):
-              cls_logits = self.InsCls[i](self.ins_feat)
-              loss.append(F.cross_entropy(cls_logits, temp_dict['gt_classes'], reduction="mean")) 
+              #cls_scores = self.InsCls[i](self.box_features)
+              targets_indi = targets[targets[:, 0] == index]
+              targets_indi[:, 0] = 0
+              loss_indi, loss_components = compute_loss(yolo_outputs, targets_indi, self.detector)
+              loss.append(loss_indi)
 
-        loss_dict['cls'] = self.reg_weights[4]*(torch.mean(torch.stack(loss)))
+        loss_dict['cls'] = self.reg_weights[4]*(torch.sum(torch.stack(loss))) 
         loss = sum(loss for loss in loss_dict.values())
         
         self.mode = 0
-       
- 	 
-      return {"loss": loss}
+     		 
+      return {"loss": loss}#, "log": torch.stack(temp_loss).detach().cpu()
+
 
     def validation_step(self, batch, batch_idx):
       
       img, boxes, labels, domain = batch
       
-      preds = self.forward(img)
-
-      for index in range(len(preds)):
-           preds[index]['boxes'] = preds[index]['boxes'][preds[index]['scores'] > 0.2]
-           preds[index]['labels'] = preds[index]['labels'][preds[index]['scores'] > 0.2]
-           preds[index]['scores'] = preds[index]['scores'][preds[index]['scores'] > 0.2]
-      
       targets = []
-      for boxes, domain in zip(batch[1], batch[2]):
+      for boxes, labels in zip(batch[1], batch[2]):
         target= {}
-        target["boxes"] = boxes.float().to(device = self.device)
-        target["labels"] = torch.ones(len(target["boxes"])).long().to(device = self.device)
+        target["boxes"] = boxes.float().cuda() #/ 640
+        target["labels"] = torch.zeros(len(boxes)).long().to(device = self.device)
         targets.append(target)
+        
+      dets = self.forward(img)
+      dets = non_max_suppression(dets)
+      preds = []
+      for det in dets:
+          pred = {}
+          det = det[det[:, 4] > 0.2]
+          boxes = det[:, :4]
+          #boxes[:, 0] = boxes[:, 0] - 0.5*boxes[:, 2] # xmin = xc - 0.5*w
+          #boxes[:, 1] = boxes[:, 1] - 0.5*boxes[:, 3] # ymin = yc - 0.5*h
+          #boxes[:, 2] = boxes[:, 0] + boxes[:, 2] # xmax = xmin + w
+          #boxes[:, 3] = boxes[:, 1] + boxes[:, 3] # ymax = ymin + h
+          pred['boxes'] = torch.clip(boxes, min=0, max=640)
+          pred['scores'] = det[:, 4].cuda()
+          pred['labels'] = det[:, 5].to(torch.int32).cuda()
+          preds.append(pred)
       
-      try:
-        self.metric.update(preds, targets)
-      except:
-        print(targets)
+          
+      self.metric.update(preds, targets)
+      
           
     def on_validation_epoch_end(self):
       
@@ -430,10 +464,10 @@ class DGFCOS(LightningModule):
       self.log('val_acc', metrics['map_50'])
       print(metrics['map_per_class'], metrics['map_50'])
       self.metric.reset()
-      
-      
+
+
 def parser_args():
-  parser = argparse.ArgumentParser(description='DGFCOS Main Experiments')
+  parser = argparse.ArgumentParser(description='DGYOLO Main Experiments')
   parser.add_argument('--exp', dest='exp',
                       help='non_dg or dg',
                       default='non_dg', type=str)
@@ -462,8 +496,8 @@ if __name__ == '__main__':
   # Dataloader design based on input arguments
   # Training Dataset  
   tr_dataset = WheatDataset('data/Annots/competition_train.csv', root_dir='data/gwhd_2021/images/', image_set = 'train', transform=train_transform)
-  vl_dataset = WheatDataset('data/Annots/competition_val.csv', root_dir='data/gwhd_2021/images/', image_set = 'val', transform=valid_transform)
-  test_dataset = WheatDataset('data/Annots/competition_test.csv', root_dir='data/gwhd_2021/images/', image_set = 'tes', transform=valid_transform)
+  vl_dataset = WheatDataset('data/Annots/competition_val.csv', root_dir='data/gwhd_2021/images/', image_set = 'val', transform=val_transform)
+  test_dataset = WheatDataset('data/Annots/competition_test.csv', root_dir='data/gwhd_2021/images/', image_set = 'tes', transform=val_transform)
 
 
   train_dataloader = torch.utils.data.DataLoader(tr_dataset, batch_size=8, shuffle=True, collate_fn=collate_fn, num_workers=16, drop_last=True)	
@@ -471,7 +505,7 @@ if __name__ == '__main__':
   test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False,  collate_fn=collate_fn)
   
   # Instantiating the detector
-  detector = DGFCOS(2, 8, args.exp, args.reg_weights) # Num classes + 1 and batch_size
+  detector = DGYOLO(2, 8, args.exp, args.reg_weights) # Num classes + 1 and batch_size
 
   if os.path.exists(NET_FOLDER+'/'+weights_file+'.ckpt'): 
     detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])
