@@ -508,8 +508,8 @@ if __name__ == '__main__':
   early_stop_callback= EarlyStopping(monitor='val_acc', min_delta=0.00, patience=10, verbose=False, mode='max')
   checkpoint_callback = ModelCheckpoint(monitor='val_acc', dirpath=NET_FOLDER, filename=weights_file, mode='max')
   
-  #trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], num_sanity_val_steps=2)
-  #trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
+  trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], num_sanity_val_steps=2)
+  trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
   
   
   detector.pr_file = 'pr_'+weights_file 
