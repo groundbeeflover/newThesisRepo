@@ -17,6 +17,7 @@ from torch.autograd import Variable, Function
 import torchvision
 import torchvision.models as models
 import torchvision.transforms as transforms
+import pickle
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.ops.boxes import box_iou
 from torchvision.models.detection._utils import Matcher
