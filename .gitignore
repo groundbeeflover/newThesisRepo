@@ -12,6 +12,7 @@ weights
 weights/*
 temp
 helpers/*.pkl
+helpers/*.png
 
 __pycache__
 lightning_logs
