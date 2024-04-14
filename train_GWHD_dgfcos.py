@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, Subset, WeightedRandomSampler
 from torch.autograd import Variable, Function
+import pickle
 
 import torchvision
 import torchvision.models as models
@@ -266,7 +267,8 @@ class DGFCOS(LightningModule):
         self.InsCls = nn.ModuleList([_InsCls(self.n_classes) for i in range(self.num_domains)])
         self.InsClsPrime = nn.ModuleList([_InsClsPrime(self.n_classes) for i in range(self.num_domains)])
         
-        self.metric = MeanAveragePrecision(iou_type="bbox", class_metrics=True, iou_thresholds = [0.5])
+        self.metric = MeanAveragePrecision(iou_type="bbox", class_metrics=True, iou_thresholds = [0.1, 0.5, 0.75], extended_summary=True)
+        self.pr_file = 'baseline'
         self.base_lr = 1e-4 #Original base lr is 1e-4
         self.momentum = 0.9
         self.weight_decay=0.0001
@@ -406,11 +408,7 @@ class DGFCOS(LightningModule):
       
       preds = self.forward(img)
 
-      for index in range(len(preds)):
-           preds[index]['boxes'] = preds[index]['boxes'][preds[index]['scores'] > 0.2]
-           preds[index]['labels'] = preds[index]['labels'][preds[index]['scores'] > 0.2]
-           preds[index]['scores'] = preds[index]['scores'][preds[index]['scores'] > 0.2]
-      
+         
       targets = []
       for boxes, domain in zip(batch[1], batch[2]):
         target= {}
@@ -429,6 +427,10 @@ class DGFCOS(LightningModule):
       
       self.log('val_acc', metrics['map_50'])
       print(metrics['map_per_class'], metrics['map_50'])
+      
+      with open('helpers/'+self.pr_file+'.pkl', 'wb') as f:
+        pickle.dump(metrics['precision'].cpu(), f)
+
       self.metric.reset()
       
       
@@ -486,6 +488,7 @@ if __name__ == '__main__':
   trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], num_sanity_val_steps=2)
   trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
   
+  detector.pr_file = 'pr_'+weights_file
   detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])
   trainer = Trainer(accelerator="gpu", max_epochs=0, num_sanity_val_steps=-1)
   trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=test_dataloader)          

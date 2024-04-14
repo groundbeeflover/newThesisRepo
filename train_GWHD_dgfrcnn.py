@@ -289,9 +289,7 @@ class DGFRCNN(LightningModule):
         self.base_lr = 1e-4 #Original base lr is 1e-4
         self.momentum = 0.9
         self.weight_decay=0.0001
-        self.conf_thresh = 0.2
-        self.iou_thresh = 0.5
-        
+                
 
         # Tapping the backbone features and region proposal features and its labels
         self.detector.backbone.register_forward_hook(self.store_backbone_out)

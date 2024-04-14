@@ -278,7 +278,7 @@ class DGYOLO(LightningModule):
         self.ImageDA = _ImageDA(256, self.num_domains)
         self.InsDA = _InstanceDA(self.num_domains)
         
-        
+        self.pr_file = 'baseline'
         self.base_lr = 0.01
         self.momentum = 0.9
         self.weight_decay=0.0005
@@ -464,6 +464,12 @@ class DGYOLO(LightningModule):
       self.log('val_acc', metrics['map_50'])
       print(metrics['map_per_class'], metrics['map_50'])
       self.metric.reset()
+      
+      with open('helpers/'+self.pr_file+'.pkl', 'wb') as f:
+        pickle.dump(metrics['precision'].cpu(), f)
+
+      self.metric.reset()
+
 
 
 def parser_args():
@@ -520,6 +526,7 @@ if __name__ == '__main__':
   trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], num_sanity_val_steps=2)
   trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
   
+  detector.pr_file = 'pr_'+weights_file  
   detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])
   trainer = Trainer(accelerator="gpu", max_epochs=0, num_sanity_val_steps=-1)
   trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=test_dataloader)          
