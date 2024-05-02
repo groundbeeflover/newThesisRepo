@@ -28,6 +28,7 @@ from torchvision.ops.boxes import box_iou
 from torchvision.models.detection._utils import Matcher
 from torchvision.ops import nms, box_convert
 from torchmetrics.detection import MeanAveragePrecision
+from torchvision.utils import draw_bounding_boxes
 
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
@@ -283,13 +284,14 @@ def collate_fn(batch):
 
 import fasterrcnn
 class DGFRCNN(LightningModule):
-    def __init__(self,n_classes, batch_size, exp, reg_weights):
+    def __init__(self,n_classes, batch_size, exp, reg_weights, draw_boxes):
         super(DGFRCNN, self).__init__()
         self.n_classes = n_classes
         self.num_domains = len(tr_datasets)
         self.batch_size = batch_size
         self.exp = exp
         self.reg_weights = reg_weights
+        self.draw_boxes = draw_boxes
         
         self.detector = fasterrcnn.fasterrcnn_resnet50_fpn(min_size=600, max_size=1200, num_classes=self.n_classes, pretrained=True, trainable_backbone_layers=3)
         self.ImageDA = _ImageDAFPN(256, self.num_domains)
@@ -443,11 +445,23 @@ class DGFRCNN(LightningModule):
       
       preds = self.forward(img)
 
+      colors = [(0, 0, 0), (0, 0, 255), (0, 255, 0), (255, 0, 0), (255, 255, 0), (0, 255, 255), (255, 0, 255), (0, 0, 150), (0, 150, 0)]
+      
       for index in range(len(preds)):
            preds[index]['boxes'] = preds[index]['boxes'][preds[index]['scores'] > 0.2]
            preds[index]['labels'] = preds[index]['labels'][preds[index]['scores'] > 0.2]
            preds[index]['scores'] = preds[index]['scores'][preds[index]['scores'] > 0.2]
-      
+           
+           
+           if self.draw_boxes:
+             plt_img = (255*img).to(torch.uint8)
+             colors_list = []       
+             for label in preds[index]['labels'][preds[index]['scores'] > 0.5]:
+                 colors_list.append(colors[label])
+             dgfrcnn_boxes = draw_bounding_boxes(plt_img[0], preds[index]['boxes'][preds[index]['scores'] > 0.5], colors=colors_list, width=5)
+             cv2.imwrite('temp/dgfrcnn_driving_detections/'+str(batch_idx)+'.png', cv2.cvtColor(dgfrcnn_boxes.permute(1, 2, 0).cpu().numpy(), cv2.COLOR_BGR2RGB))    
+      	       
+      	       
       targets = []
       for boxes, labels in zip(batch[1], batch[2]):
         target= {}
@@ -490,7 +504,11 @@ def parser_args():
   parser.add_argument('--weights_file', dest='weights_file',
                       help='Name of the weights file',
                       default='single_source_acdc', type=str)
-
+  
+  parser.add_argument('--eval_only', action='store_true')
+  
+  parser.add_argument('--draw_boxes', action='store_true')
+  
   parser.add_argument('--reg_weights', nargs = 5, metavar=('a', 'b', 'c', 'd', 'e'), 
                        dest='reg_weights', help='Regularisation constats', type=float)
                       
@@ -500,6 +518,7 @@ def parser_args():
 if __name__ == '__main__':
 
   args = parser_args()
+  
   
   NET_FOLDER = args.weights_folder
   
@@ -576,7 +595,7 @@ if __name__ == '__main__':
   test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False,  collate_fn=collate_fn)
   
   # Instantiating the detector
-  detector = DGFRCNN(9, 8, args.exp, args.reg_weights) # Num classes + 1 and batch_size
+  detector = DGFRCNN(9, 8, args.exp, args.reg_weights, args.draw_boxes) # Num classes + 1 and batch_size
 
   if os.path.exists(NET_FOLDER+'/'+weights_file+'.ckpt'): 
     detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])
@@ -588,10 +607,11 @@ if __name__ == '__main__':
   early_stop_callback= EarlyStopping(monitor='val_acc', min_delta=0.00, patience=10, verbose=False, mode='max')
   checkpoint_callback = ModelCheckpoint(monitor='val_acc', dirpath=NET_FOLDER, filename=weights_file, mode='max')
   
-  #trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], num_sanity_val_steps=2)
-  #trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
+  if not args.eval_only:
+    trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], num_sanity_val_steps=2)
+    trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
   
   detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])
   trainer = Trainer(accelerator="gpu", max_epochs=0, num_sanity_val_steps=-1)
   trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=test_dataloader)
-   
+  
