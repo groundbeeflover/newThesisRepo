@@ -286,8 +286,10 @@ class DGYOLO(LightningModule):
         
         self.best_val_acc = 0
         self.log('val_acc', self.best_val_acc)
-        self.metric = MeanAveragePrecision(iou_type="bbox", class_metrics=True, iou_thresholds = [0.5])        
-                
+        self.metric = MeanAveragePrecision(iou_type="bbox", class_metrics=True, iou_thresholds = [0.1, 0.5, 0.75], extended_summary=True)
+        self.per_domain_metric = MeanAveragePrecision(iou_type="bbox", class_metrics=True, iou_thresholds = [0.5])
+        self.per_domain_mAP = {}
+          
         self.mode = 0
     
     def forward(self, imgs,targets=None):
@@ -432,7 +434,7 @@ class DGYOLO(LightningModule):
       img, boxes, labels, domain = batch
       
       targets = []
-      for boxes, labels in zip(batch[1], batch[2]):
+      for boxes, domain in zip(batch[1], batch[2]):
         target= {}
         target["boxes"] = boxes.float().cuda() #/ 640
         target["labels"] = torch.zeros(len(boxes)).long().to(device = self.device)
@@ -456,7 +458,14 @@ class DGYOLO(LightningModule):
       
           
       self.metric.update(preds, targets)
-      
+      self.per_domain_metric.update(preds, targets)
+       
+      domain = domain.item()
+      if domain in self.per_domain_mAP.keys():
+        self.per_domain_mAP[domain].append(self.per_domain_metric.compute()['map_50'].detach().cpu())
+        self.per_domain_metric.reset()
+      else:
+        self.per_domain_mAP[domain] = [self.per_domain_metric.compute()['map_50'].detach().cpu()]
           
     def on_validation_epoch_end(self):
       
@@ -470,6 +479,13 @@ class DGYOLO(LightningModule):
         pickle.dump(metrics['precision'].cpu(), f)
 
       self.metric.reset()
+      
+      avg = 0
+      for key in self.per_domain_mAP.keys():
+        print(key, torch.mean(torch.stack(self.per_domain_mAP[key])), len(self.per_domain_mAP[key]))    
+        avg = avg + torch.mean(torch.stack(self.per_domain_mAP[key]))
+      
+      print(avg/18)
 
 
 
@@ -524,8 +540,8 @@ if __name__ == '__main__':
   early_stop_callback= EarlyStopping(monitor='val_acc', min_delta=0.00, patience=10, verbose=False, mode='max')
   checkpoint_callback = ModelCheckpoint(monitor='val_acc', dirpath=NET_FOLDER, filename=weights_file, mode='max')
   
-  trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], num_sanity_val_steps=2)
-  trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
+  #trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], num_sanity_val_steps=2)
+  #trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
   
   detector.pr_file = 'pr_'+weights_file  
   detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])

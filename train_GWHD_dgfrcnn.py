@@ -58,6 +58,7 @@ class WheatDataset(Dataset):
         #self.domains_str = annotations['domain']
         unique_values = annotations['domain'].unique()
         unique_indices = {value: index for index, value in enumerate(unique_values)}
+        print(unique_indices)
         self.domain_index = annotations['domain_index'] = annotations['domain'].map(unique_indices)
        
         self.transform = transform
@@ -285,6 +286,8 @@ class DGFRCNN(LightningModule):
         self.InsClsPrime = nn.ModuleList([_InsClsPrime(self.n_classes) for i in range(self.num_domains)])
 
         self.metric = MeanAveragePrecision(iou_type="bbox", class_metrics=True, iou_thresholds = [0.1, 0.5, 0.75], extended_summary=True)
+        self.per_domain_metric = MeanAveragePrecision(iou_type="bbox", class_metrics=True, iou_thresholds = [0.5])
+        self.per_domain_mAP = {}
         self.pr_file = 'baseline'
         self.base_lr = 1e-4 #Original base lr is 1e-4
         self.momentum = 0.9
@@ -438,6 +441,15 @@ class DGFRCNN(LightningModule):
       
       try:
         self.metric.update(preds, targets)
+        self.per_domain_metric.update(preds, targets)
+       
+        domain = domain.item()
+        if domain in self.per_domain_mAP.keys():
+          self.per_domain_mAP[domain].append(self.per_domain_metric.compute()['map_50'].detach().cpu())
+          self.per_domain_metric.reset()
+        else:
+          self.per_domain_mAP[domain] = [self.per_domain_metric.compute()['map_50'].detach().cpu()]
+          
       except:
         print(targets)
           
@@ -452,7 +464,9 @@ class DGFRCNN(LightningModule):
       with open('helpers/'+self.pr_file+'.pkl', 'wb') as f:
         pickle.dump(metrics['precision'].cpu(), f)
         
-          
+      
+      for key in self.per_domain_mAP.keys():
+        print(key, torch.mean(torch.stack(self.per_domain_mAP[key])), len(self.per_domain_mAP[key]))    
    
 def parser_args():
   parser = argparse.ArgumentParser(description='DGFRCNN Main Experiments')
@@ -506,14 +520,14 @@ if __name__ == '__main__':
   early_stop_callback= EarlyStopping(monitor='val_acc', min_delta=0.00, patience=10, verbose=False, mode='max')
   checkpoint_callback = ModelCheckpoint(monitor='val_acc', dirpath=NET_FOLDER, filename=weights_file, mode='max')
   
-  trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], num_sanity_val_steps=2)
-  trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
+  #trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], num_sanity_val_steps=2)
+  #trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
   
   
   detector.pr_file = 'pr_'+weights_file 
   detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])
   trainer = Trainer(accelerator="gpu", max_epochs=0, num_sanity_val_steps=-1)
   trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=test_dataloader)          
-
+  #trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=train_dataloader)
   
   
