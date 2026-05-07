@@ -498,17 +498,24 @@ if __name__ == '__main__':
 
   # Dataloader design based on input arguments
   # Training Dataset  
+  
   tr_dataset = WheatDataset('data/Annots/competition_train.csv', root_dir='data/gwhd_2021/images/', image_set = 'train', transform=train_transform)
   vl_dataset = WheatDataset('data/Annots/competition_val.csv', root_dir='data/gwhd_2021/images/', image_set = 'val', transform=valid_transform)
   test_dataset = WheatDataset('data/Annots/competition_test.csv', root_dir='data/gwhd_2021/images/', image_set = 'tes', transform=valid_transform)
-
+  
+  tr_subdataset = Subset(tr_dataset, list(range(32)))
+  vl_subdataset = Subset(vl_dataset, list(range(2)))
 
   train_dataloader = torch.utils.data.DataLoader(tr_dataset, batch_size=8, shuffle=True, collate_fn=collate_fn, num_workers=16, drop_last=True)	
   val_dataloader = torch.utils.data.DataLoader(vl_dataset, batch_size=1, shuffle=False,  collate_fn=collate_fn)
   test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False,  collate_fn=collate_fn)
-  
   # Instantiating the detector
   detector = DGFRCNN(2, 8, args.exp, args.reg_weights) # Num classes + 1 and batch_size
+  
+  #train_dataloader = torch.utils.data.DataLoader(tr_subdataset, batch_size=8, shuffle=False, collate_fn=collate_fn, num_workers=0, drop_last=True)	
+  #val_dataloader = torch.utils.data.DataLoader(vl_subdataset, batch_size=1, shuffle=False,  collate_fn=collate_fn, num_workers=0)
+  
+  #detector = DGFRCNN(2, 8, args.exp, args.reg_weights)
 
   if os.path.exists(NET_FOLDER+'/'+weights_file+'.ckpt'): 
     detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])
@@ -520,14 +527,24 @@ if __name__ == '__main__':
   early_stop_callback= EarlyStopping(monitor='val_acc', min_delta=0.00, patience=10, verbose=False, mode='max')
   checkpoint_callback = ModelCheckpoint(monitor='val_acc', dirpath=NET_FOLDER, filename=weights_file, mode='max')
   
-  #trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], num_sanity_val_steps=2)
-  #trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
+  #trainer = Trainer(
+  #    accelerator="cpu",
+  #    devices=1,
+  #    max_epochs=1,
+  #    limit_train_batches=8,
+  #    limit_val_batches=1,
+  #    num_sanity_val_steps=0,
+  #    callbacks=[checkpoint_callback],
+  #    logger=False
+  #)
+  trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], num_sanity_val_steps=2)
+  trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
   
   
-  detector.pr_file = 'pr_'+weights_file 
-  detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])
-  trainer = Trainer(accelerator="gpu", max_epochs=0, num_sanity_val_steps=-1)
-  trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=test_dataloader)          
+  # detector.pr_file = 'pr_'+weights_file 
+  # detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])
+  # trainer = Trainer(accelerator="gpu", max_epochs=0, num_sanity_val_steps=-1)
+  # trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=test_dataloader)          
   #trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=train_dataloader)
   
   

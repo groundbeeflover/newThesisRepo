@@ -13,7 +13,7 @@ weights/*
 temp
 helpers/*.pkl
 helpers/*.png
-
+smoke_GWHD/*
 __pycache__
 lightning_logs
 
