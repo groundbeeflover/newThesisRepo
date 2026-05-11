@@ -1,28 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# -----------------------------
-# DG Faster R-CNN full run
-# -----------------------------
+EXP_NUM="${1:-run01}"
 
 ENV_NAME="DGOD"
-RUN_NAME="gwhd_dgfrcnn_dg_paperweights_run01"
-WEIGHTS_FILE="dgfrcnn_dg_paperweights_run01"
+RUN_NAME="gwhd_dgfrcnn_dg_paperweights_${EXP_NUM}"
+WEIGHTS_FILE="dgfrcnn_dg_paperweights_${EXP_NUM}"
 RUN_DIR="runs/${RUN_NAME}"
 
 echo "Starting DG Faster R-CNN run..."
+echo "Experiment: ${EXP_NUM}"
 echo "Run directory: ${RUN_DIR}"
 
-# Activate conda
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate "${ENV_NAME}"
 
-# Create run folders
-mkdir -p "${RUN_DIR}/checkpoints"
-mkdir -p "${RUN_DIR}/logs"
-mkdir -p "${RUN_DIR}/config_snapshot"
+mkdir -p "${RUN_DIR}/checkpoints" "${RUN_DIR}/logs" "${RUN_DIR}/config_snapshot"
 
-# Save setup snapshot
 cp train_GWHD_dgfrcnn.py "${RUN_DIR}/config_snapshot/"
 cp fasterrcnn.py "${RUN_DIR}/config_snapshot/" 2>/dev/null || true
 cp requirements.txt "${RUN_DIR}/config_snapshot/" 2>/dev/null || true
@@ -32,7 +26,6 @@ conda list > "${RUN_DIR}/config_snapshot/conda_list.txt"
 nvidia-smi > "${RUN_DIR}/config_snapshot/nvidia_smi.txt"
 git rev-parse HEAD > "${RUN_DIR}/config_snapshot/git_commit.txt" 2>/dev/null || true
 
-# Save run command
 cat > "${RUN_DIR}/config_snapshot/run_command.txt" <<EOF
 python train_GWHD_dgfrcnn.py \\
   --exp dg \\
@@ -41,15 +34,13 @@ python train_GWHD_dgfrcnn.py \\
   --reg_weights 1 0.1 1 0.001 0.05
 EOF
 
-# Make sure this is a fresh run
 if [ -f "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.ckpt" ]; then
   echo "ERROR: Checkpoint already exists:"
   echo "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.ckpt"
-  echo "Delete it or change RUN_NAME/WEIGHTS_FILE before starting from scratch."
+  echo "Use a different experiment number or delete the checkpoint."
   exit 1
 fi
 
-# Start training
 python train_GWHD_dgfrcnn.py \
   --exp dg \
   --weights_folder "${RUN_DIR}/checkpoints" \
