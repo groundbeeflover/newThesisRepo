@@ -14,6 +14,7 @@ temp
 helpers/*.pkl
 helpers/*.png
 smoke_GWHD/*
+wada_smoke_test/*
 __pycache__
 lightning_logs
 

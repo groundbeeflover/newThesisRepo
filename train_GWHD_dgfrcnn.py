@@ -1,7 +1,7 @@
 from __future__ import absolute_import, division, print_function
 
 import math, sys, time, random, os
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
@@ -150,6 +150,57 @@ def collate_fn(batch):
 
     return images, targets, torch.tensor(domain_labels), orig_img
 
+def detection_accuracy(src_boxes, pred_boxes, iou_threshold=0.5):
+    """
+    Seemakurthy-style GWHD detection accuracy for one image:
+        TP / (TP + FP + FN)
+
+    This follows the old train_GWHD.py logic:
+    - match predicted boxes to ground truth boxes using IoU threshold
+    - count true positives, false positives, false negatives
+    - handle empty GT / empty prediction cases explicitly
+    """
+
+    # Keep everything on CPU for evaluation simplicity
+    src_boxes = src_boxes.detach().cpu()
+    pred_boxes = pred_boxes.detach().cpu()
+
+    total_gt = len(src_boxes)
+    total_pred = len(pred_boxes)
+
+    if total_gt > 0 and total_pred > 0:
+        matcher = Matcher(
+            iou_threshold,
+            iou_threshold,
+            allow_low_quality_matches=False
+        )
+
+        match_quality_matrix = box_iou(src_boxes, pred_boxes)
+        results = matcher(match_quality_matrix)
+
+        true_positive = torch.count_nonzero(results.unique() != -1)
+        matched_elements = results[results > -1]
+
+        false_positive = torch.count_nonzero(results == -1) + (
+            len(matched_elements) - len(matched_elements.unique())
+        )
+        false_negative = total_gt - true_positive
+
+        denom = true_positive + false_positive + false_negative
+        if denom == 0:
+            return torch.tensor(0.0)
+
+        return true_positive.float() / denom.float()
+
+    elif total_gt == 0:
+        if total_pred > 0:
+            return torch.tensor(0.0)
+        else:
+            return torch.tensor(1.0)
+
+    else:
+        # total_gt > 0 and total_pred == 0
+        return torch.tensor(0.0)
 
 class GRLayer(Function):
 
@@ -484,9 +535,120 @@ def parser_args():
   
   parser.add_argument('--reg_weights', nargs = 5, metavar=('a', 'b', 'c', 'd', 'e'), 
                        dest='reg_weights', help='Regularisation constats', type=float)
-                      
-  return parser.parse_args()
   
+  parser.add_argument('--eval_wada', action='store_true',
+                      help='Run WADA/ADA-style evaluation on the test set instead of training.')
+
+  parser.add_argument('--score_threshold', default=0.5, type=float,
+                      help='Prediction confidence threshold for WADA evaluation.')
+
+  parser.add_argument('--iou_threshold', default=0.5, type=float,
+                      help='IoU threshold for WADA matching.')
+
+  parser.add_argument('--eval_split', default='test', choices=['val', 'test'],
+                      help='Which split to evaluate with WADA.')
+    
+  parser.add_argument('--wada_output_dir', default=None, type=str,
+                      help='Optional output directory for WADA results.')              
+ 
+  parser.add_argument('--wada_max_batches', default=None, type=int,
+                    help='Optional max number of batches/images for WADA smoke testing.')
+  
+  return parser.parse_args()
+
+@torch.no_grad()
+def evaluate_wada(detector, dataloader, output_dir, score_threshold=0.5, iou_threshold=0.5, max_batches=None):
+    """
+    Evaluate a trained detector using a WADA/ADA-style metric on a dataloader.
+
+    Returns:
+        domain_scores: dict[int, float]
+        wada: unweighted mean of per-domain accuracy values
+        global_accuracy: mean over all images, not domain-balanced
+    """
+
+    detector.eval()
+    detector.to("cuda" if torch.cuda.is_available() else "cpu")
+    device = detector.device if hasattr(detector, "device") else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    per_domain_scores = {}
+    all_image_scores = []
+
+    for batch_idx, data_sample in enumerate(tqdm(dataloader, desc="WADA evaluation")):
+      if max_batches is not None and batch_idx >= max_batches:
+              break
+        
+      images, boxes_list, domain_labels, orig_imgs = data_sample
+
+        # Dataloader batch size should be 1 for WADA evaluation
+      images = images.to(device)
+
+      preds = detector(images)
+      for item_idx, pred in enumerate(preds):
+          gt_boxes = boxes_list[item_idx]
+          pred_boxes = pred["boxes"].detach().cpu()
+          pred_scores = pred["scores"].detach().cpu()
+          keep = pred_scores > score_threshold
+          pred_boxes = pred_boxes[keep]
+          domain = int(domain_labels[item_idx].item())
+          image_score = detection_accuracy(
+              gt_boxes,
+              pred_boxes,
+              iou_threshold=iou_threshold
+          ).detach().cpu()
+          if domain not in per_domain_scores:
+              per_domain_scores[domain] = []
+          per_domain_scores[domain].append(image_score)
+          all_image_scores.append(image_score)
+
+    domain_rows = []
+    for domain in sorted(per_domain_scores.keys()):
+        scores = torch.stack(per_domain_scores[domain])
+        domain_rows.append(
+            {
+                "domain_index": domain,
+                "num_images": len(scores),
+                "domain_accuracy": float(scores.mean().item()),
+            }
+        )
+
+    domain_df = pd.DataFrame(domain_rows)
+
+    if len(domain_df) == 0:
+        raise RuntimeError("No domain scores were computed. Check the dataloader/test set.")
+
+    # This is the domain-balanced score: mean of per-domain means.
+    wada = float(domain_df["domain_accuracy"].mean())
+
+    # This is the image-balanced score: mean over every image.
+    global_accuracy = float(torch.stack(all_image_scores).mean().item())
+
+    domain_df.to_csv(output_dir / "wada_per_domain.csv", index=False)
+
+    summary = {
+        "wada_domain_mean": wada,
+        "global_image_mean_accuracy": global_accuracy,
+        "score_threshold": score_threshold,
+        "iou_threshold": iou_threshold,
+        "num_domains": int(len(domain_df)),
+        "num_images": int(sum(domain_df["num_images"])),
+    }
+
+    pd.DataFrame([summary]).to_csv(output_dir / "wada_summary.csv", index=False)
+
+    print("\nWADA/ADA-style test results")
+    print("===========================")
+    print(domain_df.to_string(index=False))
+    print("")
+    print(f"WADA/domain-balanced mean: {wada:.6f}")
+    print(f"Global image mean accuracy: {global_accuracy:.6f}")
+    print(f"Saved per-domain results to: {output_dir / 'wada_per_domain.csv'}")
+    print(f"Saved summary to: {output_dir / 'wada_summary.csv'}")
+
+    return domain_df, summary
   
 if __name__ == '__main__':
 
@@ -511,6 +673,39 @@ if __name__ == '__main__':
   test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False,  collate_fn=collate_fn)
   # Instantiating the detector
   detector = DGFRCNN(2, 8, args.exp, args.reg_weights) # Num classes + 1 and batch_size
+  
+    # WADA/ADA-style evaluation mode
+  if args.eval_wada:
+    ckpt_path = os.path.join(NET_FOLDER, weights_file + '.ckpt')
+
+    if not os.path.exists(ckpt_path):
+      raise FileNotFoundError(f"Could not find checkpoint for WADA evaluation: {ckpt_path}")
+
+    print(f"Loading checkpoint for WADA evaluation: {ckpt_path}")
+    detector.load_state_dict(torch.load(ckpt_path, map_location='cpu')['state_dict'])
+
+    if args.eval_split == 'test':
+      eval_dataloader = test_dataloader
+      split_name = 'test'
+    else:
+      eval_dataloader = val_dataloader
+      split_name = 'val'
+
+    if args.wada_output_dir is not None:
+      output_dir = args.wada_output_dir
+    else:
+      output_dir = os.path.join(NET_FOLDER, f"wada_{split_name}_{weights_file}")
+    
+    evaluate_wada(
+      detector=detector,
+      dataloader=eval_dataloader,
+      output_dir=output_dir,
+      score_threshold=args.score_threshold,
+      iou_threshold=args.iou_threshold,
+      max_batches=args.wada_max_batches
+    )
+
+    sys.exit(0)
   
   #train_dataloader = torch.utils.data.DataLoader(tr_subdataset, batch_size=8, shuffle=False, collate_fn=collate_fn, num_workers=0, drop_last=True)	
   #val_dataloader = torch.utils.data.DataLoader(vl_subdataset, batch_size=1, shuffle=False,  collate_fn=collate_fn, num_workers=0)
