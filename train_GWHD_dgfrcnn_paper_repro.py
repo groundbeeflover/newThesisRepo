@@ -538,6 +538,30 @@ def parser_args():
   parser.add_argument('--reg_weights', nargs = 5, metavar=('a', 'b', 'c', 'd', 'e'), 
                        dest='reg_weights', help='Regularisation constats', type=float)
   
+  parser.add_argument('--batch_size', default=2, type=int,
+                      help='Training batch size. Paper-aligned Faster R-CNN/GWHD value is 2.')
+
+  parser.add_argument('--lr', default=0.001, type=float,
+                      help='Learning rate. Paper-aligned Faster R-CNN/GWHD value is 0.001.')
+
+  parser.add_argument('--weight_decay', default=0.0005, type=float,
+                      help='Weight decay. Paper-aligned Faster R-CNN/GWHD value is 0.0005.')
+
+  parser.add_argument('--num_workers', default=16, type=int,
+                      help='Number of DataLoader workers.')
+
+  parser.add_argument('--max_epochs', default=100, type=int,
+                      help='Maximum number of training epochs.')
+
+  parser.add_argument('--eval_map', action='store_true',
+                      help='Run mAP@50 evaluation on val/test split instead of training.')
+
+  parser.add_argument('--map_output_dir', default=None, type=str,
+                      help='Optional output directory for mAP@50 results.')
+
+  parser.add_argument('--map_max_batches', default=None, type=int,
+                      help='Optional max number of batches/images for mAP smoke testing.')
+  
   parser.add_argument('--eval_wada', action='store_true',
                       help='Run WADA/ADA-style evaluation on the test set instead of training.')
 
