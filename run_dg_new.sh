@@ -39,7 +39,7 @@ python train_GWHD_dgfrcnn_paper.py \\
   --exp dg \\
   --weights_folder "${RUN_DIR}/checkpoints" \\
   --weights_file "${WEIGHTS_FILE}" \\
-  --batch_size 2 \\
+  --batch_size 8 \\
   --lr 0.001 \\
   --weight_decay 0.0005 \\
   --optimizer adamw \\
@@ -59,7 +59,7 @@ python train_GWHD_dgfrcnn_paper.py \
   --exp dg \
   --weights_folder "${RUN_DIR}/checkpoints" \
   --weights_file "${WEIGHTS_FILE}" \
-  --batch_size 2 \
+  --batch_size 8 \
   --lr 0.001 \
   --weight_decay 0.0005 \
   --optimizer adamw \
@@ -76,7 +76,7 @@ python train_GWHD_dgfrcnn_paper.py \\
   --exp dg \\
   --weights_folder "${RUN_DIR}/checkpoints" \\
   --weights_file "${WEIGHTS_FILE}" \\
-  --batch_size 2 \\
+  --batch_size 8 \\
   --lr 0.001 \\
   --weight_decay 0.0005 \\
   --optimizer adamw \\
@@ -94,7 +94,7 @@ EOF
     --exp dg \
     --weights_folder "${RUN_DIR}/checkpoints" \
     --weights_file "${WEIGHTS_FILE}" \
-    --batch_size 2 \
+    --batch_size 8 \
     --lr 0.001 \
     --weight_decay 0.0005 \
     --optimizer adamw \
