@@ -340,9 +340,9 @@ class DGFRCNN(LightningModule):
         self.per_domain_metric = MeanAveragePrecision(iou_type="bbox", class_metrics=True, iou_thresholds = [0.5])
         self.per_domain_mAP = {}
         self.pr_file = 'baseline'
-        self.base_lr = 1e-4 #Original base lr is 1e-4
+        self.base_lr = 0.001
         self.momentum = 0.9
-        self.weight_decay=0.0001
+        self.weight_decay = 0.0005
                 
 
         # Tapping the backbone features and region proposal features and its labels
@@ -367,18 +367,15 @@ class DGFRCNN(LightningModule):
     
     def configure_optimizers(self):
       
-      optimizer = torch.optim.Adam([{'params': self.detector.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay },
+      optimizer = torch.optim.AdamW([
+                                    {'params': self.detector.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay },
                                     {'params': self.ImageDA.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay },
                                     {'params': self.InsDA.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay },
                                     {'params': self.InsCls.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay },
                                     {'params': self.InsClsPrime.parameters(), 'lr': self.base_lr, 'weight_decay': self.weight_decay}
                                       ],) 
       
-      lr_scheduler = {'scheduler': torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'max', factor=0.1, patience=5, threshold=0.0001, min_lr=0, eps=1e-08),
-                      'monitor': 'val_acc'}
-      
-      
-      return [optimizer], [lr_scheduler]
+      return optimizer
 
       
     def training_step(self, batch, batch_idx):
@@ -533,8 +530,11 @@ def parser_args():
                       help='Name of the weights file',
                       default='baseline', type=str)
   
-  parser.add_argument('--reg_weights', nargs = 5, metavar=('a', 'b', 'c', 'd', 'e'), 
-                       dest='reg_weights', help='Regularisation constats', type=float)
+  parser.add_argument('--reg_weights', nargs=5, metavar=('a', 'b', 'c', 'd', 'e'),
+                       dest='reg_weights',
+                       help='Regularisation constants: alpha1 alpha2 alpha3 alpha4 alpha5',
+                       default=[0.5, 0.5, 0.5, 0.075, 0.0001],
+                       type=float)
   
   parser.add_argument('--eval_wada', action='store_true',
                       help='Run WADA/ADA-style evaluation on the test set instead of training.')

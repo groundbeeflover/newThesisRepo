@@ -39,7 +39,7 @@ python train_GWHD_dgfrcnn.py \\
   --exp dg \\
   --weights_folder "${RUN_DIR}/checkpoints" \\
   --weights_file "${WEIGHTS_FILE}" \\
-  --reg_weights 1 0.1 1 0.001 0.05
+  --reg_weights 0.5 0.5 0.5 0.075 0.0001
 EOF
 
 if [ -f "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.ckpt" ]; then
@@ -53,7 +53,7 @@ python train_GWHD_dgfrcnn.py \
   --exp dg \
   --weights_folder "${RUN_DIR}/checkpoints" \
   --weights_file "${WEIGHTS_FILE}" \
-  --reg_weights 1 0.1 1 0.001 0.05 \
+  --reg_weights 0.5 0.5 0.5 0.075 0.0001
   2>&1 | tee "${RUN_DIR}/logs/train.log"
 
 if [ "${RUN_WADA}" = "wada" ] || [ "${RUN_WADA}" = "--wada" ] || [ "${RUN_WADA}" = "true" ]; then
@@ -64,7 +64,7 @@ python train_GWHD_dgfrcnn.py \\
   --exp dg \\
   --weights_folder "${RUN_DIR}/checkpoints" \\
   --weights_file "${WEIGHTS_FILE}" \\
-  --reg_weights 1 0.1 1 0.001 0.05 \\
+  --reg_weights 0.5 0.5 0.5 0.075 0.0001 \\
   --eval_wada \\
   --eval_split test \\
   --score_threshold 0.5 \\
@@ -76,7 +76,7 @@ EOF
     --exp dg \
     --weights_folder "${RUN_DIR}/checkpoints" \
     --weights_file "${WEIGHTS_FILE}" \
-    --reg_weights 1 0.1 1 0.001 0.05 \
+    --reg_weights 0.5 0.5 0.5 0.075 0.0001 \
     --eval_wada \
     --eval_split test \
     --score_threshold 0.5 \
