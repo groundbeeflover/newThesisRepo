@@ -198,40 +198,54 @@ class RegionProposalNetworkWILDS(RegionProposalNetwork):
 def fastrcnn_loss(class_logits, box_regression, labels, regression_targets):
     # type: (Tensor, Tensor, List[Tensor], List[Tensor]) -> Tuple[Tensor, Tensor]
     """
-    Computes the loss for Faster R-CNN.
-    Arguments:
-        class_logits (Tensor)
-        box_regression (Tensor)
-        labels (list[BoxList])
-        regression_targets (Tensor)
-    Returns:
-        classification_loss (Tensor)
-        box_loss (Tensor)
+    Computes per-image Faster R-CNN ROI losses.
+
+    This version avoids assuming a fixed 512 sampled RoIs per image.
+    It splits class_logits and box_regression by the actual number of
+    labels returned for each image.
     """
-    class_logits = torch.split(class_logits, 512,dim=0)
-    box_regression = torch.split(box_regression, 512,dim=0)
+
+    labels_per_image = [len(labels_per_img) for labels_per_img in labels]
+
+    class_logits_split = torch.split(class_logits, labels_per_image, dim=0)
+    box_regression_split = torch.split(box_regression, labels_per_image, dim=0)
+
     classification_loss = []
     box_loss = []
 
-    for class_logits_, box_regression_, labels_, regression_targets_ in zip(class_logits, box_regression, labels, regression_targets):
+    for class_logits_, box_regression_, labels_, regression_targets_ in zip(
+        class_logits_split,
+        box_regression_split,
+        labels,
+        regression_targets
+    ):
+        if labels_.numel() == 0 or class_logits_.shape[0] == 0:
+            zero_loss = class_logits_.sum() * 0.0 + box_regression_.sum() * 0.0
+            classification_loss.append(zero_loss)
+            box_loss.append(zero_loss)
+            continue
+
         classification_loss.append(F.cross_entropy(class_logits_, labels_))
-        # get indices that correspond to the regression targets for
-        # the corresponding ground truth labels, to be used with
-        # advanced indexing
+
         sampled_pos_inds_subset = torch.where(labels_ > 0)[0]
-
         labels_pos = labels_[sampled_pos_inds_subset]
-        N, num_classes = class_logits_.shape
 
-        box_regression_ = box_regression_.reshape(N, -1, 4)
+        num_rois = class_logits_.shape[0]
+        num_classes = class_logits_.shape[1]
 
-        box_loss_ = F.smooth_l1_loss(
-            box_regression_[sampled_pos_inds_subset, labels_pos],
-            regression_targets_[sampled_pos_inds_subset],
-            beta=1 / 9,
-            reduction='sum',
-        )
-        box_loss.append(box_loss_ / labels_.numel())
+        box_regression_ = box_regression_.reshape(num_rois, num_classes, 4)
+
+        if sampled_pos_inds_subset.numel() == 0:
+            box_loss_ = box_regression_.sum() * 0.0
+        else:
+            box_loss_ = F.smooth_l1_loss(
+                box_regression_[sampled_pos_inds_subset, labels_pos],
+                regression_targets_[sampled_pos_inds_subset],
+                beta=1 / 9,
+                reduction='sum',
+            )
+
+        box_loss.append(box_loss_ / max(labels_.numel(), 1))
 
     return torch.stack(classification_loss), torch.stack(box_loss)
 
