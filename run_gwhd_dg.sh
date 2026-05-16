@@ -53,7 +53,7 @@ python train_GWHD_dgfrcnn.py \
   --exp dg \
   --weights_folder "${RUN_DIR}/checkpoints" \
   --weights_file "${WEIGHTS_FILE}" \
-  --reg_weights 0.5 0.5 0.5 0.075 0.0001
+  --reg_weights 0.5 0.5 0.5 0.075 0.0001 \
   2>&1 | tee "${RUN_DIR}/logs/train.log"
 
 if [ "${RUN_WADA}" = "wada" ] || [ "${RUN_WADA}" = "--wada" ] || [ "${RUN_WADA}" = "true" ]; then
