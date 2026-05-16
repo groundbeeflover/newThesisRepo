@@ -337,8 +337,7 @@ class DGFRCNN(LightningModule):
         self.InsClsPrime = nn.ModuleList([_InsClsPrime(self.n_classes) for i in range(self.num_domains)])
 
         self.metric = MeanAveragePrecision(iou_type="bbox", class_metrics=True, iou_thresholds = [0.1, 0.5, 0.75], extended_summary=True)
-        self.per_domain_metric = MeanAveragePrecision(iou_type="bbox", class_metrics=True, iou_thresholds = [0.5])
-        self.per_domain_mAP = {}
+        self.per_domain_metrics = {}
         self.pr_file = 'baseline'
         self.base_lr = 0.001
         self.momentum = 0.9
@@ -577,47 +576,75 @@ class DGFRCNN(LightningModule):
 
       return {"loss": loss}#, "log": torch.stack(temp_loss).detach().cpu()}
 
+    def on_validation_epoch_start(self):
+      self.per_domain_metrics = {}
+    
     def validation_step(self, batch, batch_idx):
-      
-      img, boxes, labels, domain = batch
-      
-      preds = self.forward(img)
-         
+
+      # Skip sanity-check metrics so they do not pollute epoch-level validation logs.
+      if self.trainer.sanity_checking:
+        return
+
+      imgs, boxes_list, domain_labels, orig_imgs = batch
+
+      preds = self.forward(imgs)
+
       targets = []
-      for boxes, domain in zip(batch[1], batch[2]):
-        target= {}
-        target["boxes"] = boxes.float().to(device = self.device)
-        target["labels"] = torch.ones(len(target["boxes"])).long().to(device = self.device)
+      for boxes in boxes_list:
+        target = {}
+        target["boxes"] = boxes.float().to(device=self.device)
+        target["labels"] = torch.ones(len(target["boxes"])).long().to(device=self.device)
         targets.append(target)
-      
+
       try:
+        # Global validation mAP across the whole validation set.
         self.metric.update(preds, targets)
-        self.per_domain_metric.update(preds, targets)
-       
-        domain = domain.item()
-        if domain in self.per_domain_mAP.keys():
-          self.per_domain_mAP[domain].append(self.per_domain_metric.compute()['map_50'].detach().cpu())
-          self.per_domain_metric.reset()
-        else:
-          self.per_domain_mAP[domain] = [self.per_domain_metric.compute()['map_50'].detach().cpu()]
-          
-      except:
+
+        # Proper per-domain mAP: accumulate all images in each domain,
+        # compute once at epoch end.
+        for pred, target, domain in zip(preds, targets, domain_labels):
+          domain_id = int(domain.item())
+
+          if domain_id not in self.per_domain_metrics:
+            self.per_domain_metrics[domain_id] = MeanAveragePrecision(
+                iou_type="bbox",
+                class_metrics=False,
+                iou_thresholds=[0.5]
+            ).to(self.device)
+
+          self.per_domain_metrics[domain_id].update([pred], [target])
+
+      except Exception as e:
+        print("Validation metric update failed:")
+        print(e)
         print(targets)
           
     def on_validation_epoch_end(self):
-      
+
+      if self.trainer.sanity_checking:
+        self.metric.reset()
+        self.per_domain_metrics = {}
+        return
+
       metrics = self.metric.compute()
-      
-      self.log('val_acc', metrics['map_50'])
-      print(metrics['map_per_class'], metrics['map_50'])
-      self.metric.reset()
-      
+
+      self.log('val_acc', metrics['map_50'], prog_bar=True)
+      print("Global validation metrics:")
+      print("map_per_class:", metrics['map_per_class'])
+      print("map_50:", metrics['map_50'])
+
+      os.makedirs('helpers', exist_ok=True)
       with open('helpers/'+self.pr_file+'.pkl', 'wb') as f:
         pickle.dump(metrics['precision'].cpu(), f)
-        
-      
-      for key in self.per_domain_mAP.keys():
-        print(key, torch.mean(torch.stack(self.per_domain_mAP[key])), len(self.per_domain_mAP[key]))    
+
+      self.metric.reset()
+
+      print("Per-domain validation mAP@50:")
+      for domain_id in sorted(self.per_domain_metrics.keys()):
+        domain_metrics = self.per_domain_metrics[domain_id].compute()
+        print(domain_id, domain_metrics['map_50'])
+
+      self.per_domain_metrics = {}
    
 def parser_args():
   parser = argparse.ArgumentParser(description='DGFRCNN Main Experiments')
