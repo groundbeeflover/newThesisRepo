@@ -394,82 +394,185 @@ class DGFRCNN(LightningModule):
       #Detection using source images
       
       if(self.mode == 0):
-        
+
         loss_dict = {}
         detections = self.detector(imgs, targets)
         loss = sum([loss for detection in detections for loss in detection['losses'].values()])
-        
+
         loss_dict['detection_loss'] = loss
-        
-        
+
         if(self.exp == 'dg'):
           ImgDA_scores = self.ImageDA(self.base_feat['0'])
-          loss_dict['DA_img_loss'] = self.reg_weights[0]*F.cross_entropy(ImgDA_scores, batch[2].to(device=self.device))
+          loss_dict['DA_img_loss'] = self.reg_weights[0] * F.cross_entropy(
+              ImgDA_scores,
+              batch[2].to(device=self.device)
+          )
+
           IDA_out = self.InsDA(self.box_features)
-          rep_factor = int(IDA_out.shape[0]/self.batchsize)
-          ins_labels = batch[2].reshape(self.batchsize,1).repeat(1, rep_factor).reshape(IDA_out.shape[0])      
-          loss_dict['DA_ins_loss'] = self.reg_weights[1]*F.cross_entropy(IDA_out, ins_labels.to(device=self.device))
-          ExpImgDA_scores =ImgDA_scores.repeat(1, rep_factor).reshape(IDA_out.shape[0], self.num_domains)
-          loss_dict['Cst_loss'] = self.reg_weights[2]*F.mse_loss(IDA_out, ExpImgDA_scores)       
+
+          # Each image can contribute a different number of RoI features.
+          # Do not assume IDA_out.shape[0] is divisible by batch size.
+          roi_counts = [labels_per_img.numel() for labels_per_img in self.box_labels]
+
+          ins_labels = torch.cat([
+              batch[2][img_idx].repeat(roi_count)
+              for img_idx, roi_count in enumerate(roi_counts)
+          ]).long().to(device=self.device)
+
+          ExpImgDA_scores = torch.cat([
+              ImgDA_scores[img_idx].unsqueeze(0).repeat(roi_count, 1)
+              for img_idx, roi_count in enumerate(roi_counts)
+          ], dim=0)
+
+          if IDA_out.shape[0] != ins_labels.shape[0]:
+            raise RuntimeError(
+                f"DG mode 0 instance-label mismatch: "
+                f"IDA_out={IDA_out.shape}, "
+                f"ins_labels={ins_labels.shape}, "
+                f"roi_counts={roi_counts}, "
+                f"batch_domains={batch[2]}"
+            )
+
+          loss_dict['DA_ins_loss'] = self.reg_weights[1] * F.cross_entropy(
+              IDA_out,
+              ins_labels
+          )
+
+          loss_dict['Cst_loss'] = self.reg_weights[2] * F.mse_loss(
+              IDA_out,
+              ExpImgDA_scores
+          )
+
           self.mode = 1
-          
-        loss = sum(loss1 for loss1 in loss_dict.values())       
-	                 
+
+        loss = sum(loss1 for loss1 in loss_dict.values())
+
       elif(self.mode == 1): #Without recording the gradients for detector, we need to update the weights for classifier weights
         loss_dict = {}
         loss = []
 
-        
         for index in range(len(self.InsCls)):
-          for param in self.InsCls[index].parameters(): param.requires_grad = True
+          for param in self.InsCls[index].parameters():
+            param.requires_grad = True
 
         for index in range(len(imgs)):
           with torch.no_grad():
             _ = self.detector([imgs[index]], [targets[index]])
-          cls_scores = self.InsCls[batch[2][index].item()](self.box_features)
-          loss.append(F.cross_entropy(cls_scores, self.box_labels[0])) 
 
-        loss_dict['cls'] = self.reg_weights[4]*(torch.mean(torch.stack(loss)))
+          cls_scores = self.InsCls[batch[2][index].item()](self.box_features)
+          box_labels = self.box_labels[0]
+
+          if box_labels.numel() == 0 or cls_scores.shape[0] == 0:
+            continue
+
+          if cls_scores.shape[0] != box_labels.shape[0]:
+            raise RuntimeError(
+                f"DG mode 1 classifier-label mismatch: "
+                f"cls_scores={cls_scores.shape}, "
+                f"box_labels={box_labels.shape}, "
+                f"image_index={index}, "
+                f"domain={batch[2][index]}"
+            )
+
+          loss.append(F.cross_entropy(cls_scores, box_labels))
+
+        if len(loss) > 0:
+          loss_dict['cls'] = self.reg_weights[4] * torch.mean(torch.stack(loss))
+        else:
+          loss_dict['cls'] = sum(p.sum() for p in self.InsCls.parameters()) * 0.0
+
         loss = sum(loss for loss in loss_dict.values())
 
         self.mode = 2
-        
+
       elif(self.mode == 2): #Only the GRL Classification should influence the updates but here we need to update the detector weights as well
         loss_dict = {}
         loss = []
-    
+
         for index in range(len(imgs)):
           _ = self.detector([imgs[index]], [targets[index]])
+
           cls_scores = self.InsClsPrime[batch[2][index].item()](self.box_features)
-          loss.append(F.cross_entropy(cls_scores, self.box_labels[0]))
-  	  
-        loss_dict['cls_prime'] = self.reg_weights[3]*(torch.mean(torch.stack(loss)))
+          box_labels = self.box_labels[0]
+
+          if box_labels.numel() == 0 or cls_scores.shape[0] == 0:
+            continue
+
+          if cls_scores.shape[0] != box_labels.shape[0]:
+            raise RuntimeError(
+                f"DG mode 2 classifier-label mismatch: "
+                f"cls_scores={cls_scores.shape}, "
+                f"box_labels={box_labels.shape}, "
+                f"image_index={index}, "
+                f"domain={batch[2][index]}"
+            )
+
+          loss.append(F.cross_entropy(cls_scores, box_labels))
+
+        if len(loss) > 0:
+          loss_dict['cls_prime'] = self.reg_weights[3] * torch.mean(torch.stack(loss))
+        else:
+          loss_dict['cls_prime'] = sum(p.sum() for p in self.InsClsPrime.parameters()) * 0.0
+
         loss = sum(loss for loss in loss_dict.values())
 
         self.mode = 3
-        
+
       else: #For Mode 3
-      
+
         loss_dict = {}
         loss = []
         consis_loss = []
-        
+
         for index in range(len(self.InsCls)):
-          for param in self.InsCls[index].parameters(): param.requires_grad = False
-        
+          for param in self.InsCls[index].parameters():
+            param.requires_grad = False
+
         for index in range(len(imgs)):
           _ = self.detector([imgs[index]], [targets[index]])
           temp = []
+          box_labels = self.box_labels[0]
+
+          if box_labels.numel() == 0:
+            continue
+
           for i in range(len(self.InsCls)):
             if(i != batch[2][index].item()):
               cls_scores = self.InsCls[i](self.box_features)
-              temp.append(cls_scores)
-              loss.append(F.cross_entropy(cls_scores, self.box_labels[0]))
-          consis_loss.append(torch.mean(torch.abs(torch.stack(temp, dim=0) - torch.mean(torch.stack(temp, dim=0), dim=0))))
 
-        loss_dict['cls'] = self.reg_weights[4]*(torch.mean(torch.stack(loss)))# + torch.mean(torch.stack(consis_loss)))
+              if cls_scores.shape[0] == 0:
+                continue
+
+              if cls_scores.shape[0] != box_labels.shape[0]:
+                raise RuntimeError(
+                    f"DG mode 3 classifier-label mismatch: "
+                    f"cls_scores={cls_scores.shape}, "
+                    f"box_labels={box_labels.shape}, "
+                    f"image_index={index}, "
+                    f"source_domain={batch[2][index]}, "
+                    f"classifier_domain={i}"
+                )
+
+              temp.append(cls_scores)
+              loss.append(F.cross_entropy(cls_scores, box_labels))
+
+          if len(temp) > 0:
+            consis_loss.append(
+                torch.mean(
+                    torch.abs(
+                        torch.stack(temp, dim=0) -
+                        torch.mean(torch.stack(temp, dim=0), dim=0)
+                    )
+                )
+            )
+
+        if len(loss) > 0:
+          loss_dict['cls'] = self.reg_weights[4] * torch.mean(torch.stack(loss))
+        else:
+          loss_dict['cls'] = sum(p.sum() for p in self.InsCls.parameters()) * 0.0
+
         loss = sum(loss for loss in loss_dict.values())
-        
+
         self.mode = 0
 
       return {"loss": loss}#, "log": torch.stack(temp_loss).detach().cpu()}
