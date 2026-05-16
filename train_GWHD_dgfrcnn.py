@@ -535,6 +535,29 @@ def parser_args():
                        help='Regularisation constants: alpha1 alpha2 alpha3 alpha4 alpha5',
                        default=[0.5, 0.5, 0.5, 0.075, 0.0001],
                        type=float)
+  parser.add_argument('--batch_size', default=8, type=int,
+                      help='Training batch size. Default kept at 8 for the current debug/reproduction setup.')
+
+  parser.add_argument('--num_workers', default=16, type=int,
+                      help='Number of dataloader workers.')
+
+  parser.add_argument('--max_epochs', default=100, type=int,
+                      help='Maximum number of epochs.')
+
+  parser.add_argument('--accelerator', default='gpu', choices=['gpu', 'cpu'],
+                      help='Use gpu for pod runs, cpu for local smoke tests.')
+
+  parser.add_argument('--use_subset', action='store_true',
+                      help='Use the existing tiny train/val subsets for smoke tests.')
+
+  parser.add_argument('--limit_train_batches', default=None, type=int,
+                      help='Optionally limit number of train batches.')
+
+  parser.add_argument('--limit_val_batches', default=None, type=int,
+                      help='Optionally limit number of validation batches.')
+
+  parser.add_argument('--logger_off', action='store_true',
+                      help='Disable Lightning logger for smoke tests.')
   
   parser.add_argument('--eval_wada', action='store_true',
                       help='Run WADA/ADA-style evaluation on the test set instead of training.')
@@ -668,12 +691,40 @@ if __name__ == '__main__':
   tr_subdataset = Subset(tr_dataset, list(range(32)))
   vl_subdataset = Subset(vl_dataset, list(range(2)))
 
-  train_dataloader = torch.utils.data.DataLoader(tr_dataset, batch_size=8, shuffle=True, collate_fn=collate_fn, num_workers=16, drop_last=True)	
-  val_dataloader = torch.utils.data.DataLoader(vl_dataset, batch_size=1, shuffle=False,  collate_fn=collate_fn)
-  test_dataloader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False,  collate_fn=collate_fn)
+  if args.use_subset:
+    active_train_dataset = tr_subdataset
+    active_val_dataset = vl_subdataset
+  else:
+    active_train_dataset = tr_dataset
+    active_val_dataset = vl_dataset
+
+  train_dataloader = torch.utils.data.DataLoader(
+      active_train_dataset,
+      batch_size=args.batch_size,
+      shuffle=not args.use_subset,
+      collate_fn=collate_fn,
+      num_workers=args.num_workers,
+      drop_last=True
+  )
+
+  val_dataloader = torch.utils.data.DataLoader(
+      active_val_dataset,
+      batch_size=1,
+      shuffle=False,
+      collate_fn=collate_fn,
+      num_workers=args.num_workers
+  )
+
+  test_dataloader = torch.utils.data.DataLoader(
+      test_dataset,
+      batch_size=1,
+      shuffle=False,
+      collate_fn=collate_fn,
+      num_workers=args.num_workers
+  )
+
   # Instantiating the detector
-  detector = DGFRCNN(2, 8, args.exp, args.reg_weights) # Num classes + 1 and batch_size
-  
+  detector = DGFRCNN(2, args.batch_size, args.exp, args.reg_weights)
     # WADA/ADA-style evaluation mode
   if args.eval_wada:
     ckpt_path = os.path.join(NET_FOLDER, weights_file + '.ckpt')
@@ -732,7 +783,25 @@ if __name__ == '__main__':
   #    callbacks=[checkpoint_callback],
   #    logger=False
   #)
-  trainer = Trainer(accelerator="gpu", max_epochs=100, deterministic=False, callbacks=[checkpoint_callback, early_stop_callback], num_sanity_val_steps=2)
+  trainer_kwargs = {
+      "accelerator": args.accelerator,
+      "max_epochs": args.max_epochs,
+      "deterministic": False,
+      "callbacks": [checkpoint_callback, early_stop_callback],
+      "num_sanity_val_steps": 0 if args.use_subset else 2,
+      "logger": False if args.logger_off else True,
+  }
+
+  if args.accelerator == "cpu":
+    trainer_kwargs["devices"] = 1
+
+  if args.limit_train_batches is not None:
+    trainer_kwargs["limit_train_batches"] = args.limit_train_batches
+
+  if args.limit_val_batches is not None:
+    trainer_kwargs["limit_val_batches"] = args.limit_val_batches
+
+  trainer = Trainer(**trainer_kwargs)
   trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
   
   
