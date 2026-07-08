@@ -358,46 +358,50 @@ class DGFRCNN(LightningModule):
       return {"loss": loss}
 
     def validation_step(self, batch, batch_idx):
-      
-      img, boxes, labels, domain = batch
-      
-      preds = self.forward(img)
-         
-      targets = []
-      for boxes, domain in zip(batch[1], batch[2]):
-        target= {}
-        target["boxes"] = boxes.float().to(device = self.device)
-        target["labels"] = torch.ones(len(target["boxes"])).long().to(device = self.device)
-        targets.append(target)
-      
-      try:
+    
+        images, boxes_list, domain_labels, _ = batch
+    
+        images = [
+            image.to(self.device)
+            for image in images
+        ]
+    
+        preds = self.forward(images)
+    
+        targets = []
+    
+        for boxes in boxes_list:
+            boxes = boxes.float().to(self.device)
+    
+            targets.append({
+                "boxes": boxes,
+                "labels": torch.ones(
+                    len(boxes),
+                    dtype=torch.long,
+                    device=self.device,
+                ),
+            })
+    
         self.metric.update(preds, targets)
-        self.per_domain_metric.update(preds, targets)
-       
-        domain = domain.item()
-        if domain in self.per_domain_mAP.keys():
-          self.per_domain_mAP[domain].append(self.per_domain_metric.compute()['map_50'].detach().cpu())
-          self.per_domain_metric.reset()
-        else:
-          self.per_domain_mAP[domain] = [self.per_domain_metric.compute()['map_50'].detach().cpu()]
-          
-      except:
-        print(targets)
-          
+              
     def on_validation_epoch_end(self):
-      
-      metrics = self.metric.compute()
-      
-      self.log('val_acc', metrics['map_50'])
-      print(metrics['map_per_class'], metrics['map_50'])
-      self.metric.reset()
-      
-      with open('helpers/'+self.pr_file+'.pkl', 'wb') as f:
-        pickle.dump(metrics['precision'].cpu(), f)
-        
-      
-      for key in self.per_domain_mAP.keys():
-        print(key, torch.mean(torch.stack(self.per_domain_mAP[key])), len(self.per_domain_mAP[key]))    
+    
+        metrics = self.metric.compute()
+    
+        val_map50 = metrics["map_50"]
+    
+        self.log(
+            "val_acc",
+            val_map50,
+            prog_bar=True,
+        )
+    
+        print(
+            f"Validation mAP@50: "
+            f"{val_map50.item():.6f}"
+        )
+    
+        self.metric.reset()    
    
 def parser_args():
   parser = argparse.ArgumentParser(description='DGFRCNN Main Experiments')
@@ -446,7 +450,11 @@ def parser_args():
 
   parser.add_argument('--iou_threshold', default=0.5, type=float,
                       help='IoU threshold for WADA matching.')
-
+  parser.add_argument(
+    "--eval_map",
+    action="store_true",
+    help="Evaluate mAP on the validation or test split and exit.",)
+  
   parser.add_argument('--eval_split', default='test', choices=['val', 'test'],
                       help='Which split to evaluate with WADA.')
     
@@ -552,6 +560,82 @@ def evaluate_wada(detector, dataloader, output_dir, score_threshold=0.5, iou_thr
 
     return domain_df, summary
   
+@torch.no_grad()
+def evaluate_map(
+    detector,
+    dataloader,
+    device,
+):
+    """
+    Evaluate global mAP on one complete dataset split.
+
+    The primary thesis metric is mAP@50.
+    """
+
+    detector.eval()
+    detector.to(device)
+
+    metric = MeanAveragePrecision(
+        iou_type="bbox",
+        class_metrics=True,
+        iou_thresholds=[0.1, 0.5, 0.75],
+        extended_summary=True,
+    ).to(device)
+
+    for batch in tqdm(dataloader, desc="mAP evaluation"):
+
+        images = [
+            image.to(device)
+            for image in batch[0]
+        ]
+
+        targets = []
+
+        for boxes in batch[1]:
+            boxes = boxes.float().to(device)
+
+            targets.append({
+                "boxes": boxes,
+                "labels": torch.ones(
+                    len(boxes),
+                    dtype=torch.long,
+                    device=device,
+                ),
+            })
+
+        predictions = detector(images)
+
+        metric.update(
+            predictions,
+            targets,
+        )
+
+    results = metric.compute()
+
+    print("\nEvaluation results")
+    print("==================")
+    print(f"mAP:     {results['map'].item():.6f}")
+    print(f"mAP@50:  {results['map_50'].item():.6f}")
+    print(f"mAP@75:  {results['map_75'].item():.6f}")
+
+    if results["map_per_class"].numel() > 0:
+        print(
+            f"AP per class: "
+            f"{results['map_per_class'].detach().cpu().tolist()}"
+        )
+
+    return {
+        "map_mean_iou_10_50_75": float(
+            results["map"].item()
+        ),
+        "map_50": float(
+            results["map_50"].item()
+        ),
+        "map_75": float(
+            results["map_75"].item()
+        ),
+    }
+  
 if __name__ == '__main__':
 
   args = parser_args()
@@ -621,6 +705,73 @@ if __name__ == '__main__':
       optimizer_name=args.optimizer
   )
   
+  if args.eval_map:
+
+    ckpt_path = os.path.join(
+        NET_FOLDER,
+        weights_file + ".ckpt",
+    )
+
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(
+            f"Checkpoint not found: {ckpt_path}"
+        )
+
+    print(
+        f"Loading checkpoint: {ckpt_path}"
+    )
+
+    checkpoint = torch.load(
+        ckpt_path,
+        map_location="cpu",
+    )
+
+    detector.load_state_dict(
+        checkpoint["state_dict"]
+    )
+
+    if args.eval_split == "val":
+        eval_dataloader = val_dataloader
+        split_name = "validation"
+    else:
+        eval_dataloader = test_dataloader
+        split_name = "test"
+
+    device = torch.device(
+        "cuda"
+        if torch.cuda.is_available()
+        else "cpu"
+    )
+
+    print(
+        f"\nEvaluating {split_name} split..."
+    )
+
+    results = evaluate_map(
+        detector=detector,
+        dataloader=eval_dataloader,
+        device=device,
+    )
+
+    output_path = os.path.join(
+        NET_FOLDER,
+        f"{weights_file}_{args.eval_split}_map.csv",
+    )
+
+    pd.DataFrame([{
+        "split": args.eval_split,
+        **results,
+    }]).to_csv(
+        output_path,
+        index=False,
+    )
+
+    print(
+        f"\nSaved results to {output_path}"
+    )
+
+    sys.exit(0)
+  
     # WADA/ADA-style evaluation mode
   if args.eval_wada:
     ckpt_path = os.path.join(NET_FOLDER, weights_file + '.ckpt')
@@ -680,7 +831,7 @@ if __name__ == '__main__':
   #    logger=False
   # )
   trainer = Trainer(
-      accelerator="cpu",
+      accelerator="auto",
       max_epochs=args.max_epochs,
       deterministic=False,
       callbacks=[checkpoint_callback, early_stop_callback],
