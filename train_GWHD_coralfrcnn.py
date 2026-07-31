@@ -209,7 +209,7 @@ class DGFRCNN(LightningModule):
         super(DGFRCNN, self).__init__()
         
         self.detector = fasterrcnn.fasterrcnn_resnet50_fpn(min_size=1024, max_size=1024, pretrained_backbone=True) 
-        in_features = self.detector.roi_heads.box_predictor.cls_score.in_features
+        in_features = self.detector.roi_heads.box_predictor.cls_score.in_features 
         self.detector.roi_heads.box_predictor = FastRCNNPredictor(in_features, n_classes)
         self.n_classes = n_classes
         self.batchsize = batchsize
@@ -274,13 +274,16 @@ class DGFRCNN(LightningModule):
           return torch.optim.AdamW(params)
       return torch.optim.Adam(params)
 
+#data collected by collate_fn, inside a batch there are image tensors, ground truth bboxes, domain labels per img, original images
     def training_step(self, batch, batch_idx):
-      imgs = [image.to(self.device) for image in batch[0]]
-      image_domains = batch[2].to(self.device).long()
+      imgs = [image.to(self.device) for image in batch[0]] #moving image tensors to the gpu, if exists,
+      image_domains = batch[2].to(self.device).long() #gather domain labels to gpu
 
+
+#create a custom formatting of the gt bboxes and move to gpu
       targets = []
       for boxes in batch[1]:
-        boxes = boxes.float().to(self.device)
+        boxes = boxes.float().to(self.device) 
         targets.append({
             "boxes": boxes,
             "labels": torch.ones(
@@ -290,15 +293,21 @@ class DGFRCNN(LightningModule):
             ),
         })
 
+
       # One detector forward pass supplies detection losses, backbone features,
       # ROI features, and the already-assigned ROI training labels.
       detections = self.detector(imgs, targets)
       detection_loss = sum(
           loss
+          #for each image in a batch there is a detection object
           for detection in detections
+          #for each image there is a series of losses which are summed 
           for loss in detection["losses"].values()
       )
+      #SUMMED ACROSS IMAGES IN BATCH
 
+
+#start loss dictionary, the regular frcnn is already added. 
       loss_dict = {
           "detection_loss": detection_loss,
       }
@@ -639,35 +648,46 @@ def evaluate_map(
 if __name__ == '__main__':
 
   args = parser_args()
+  #take inputs from CLI arguments
   
   NET_FOLDER = args.weights_folder
+  #take path to weights file
   
   weights_file = args.weights_file  
+  #take weight file name
 
   # Dataloader design based on input arguments
   # Training Dataset  
   
-  tr_dataset = WheatDataset('data/Annots/competition_train.csv', root_dir='data/gwhd_2021/images/', image_set = 'train', transform=train_transform)
+  
+  #load datasets 
+  tr_dataset = WheatDataset('data/Annots/competition_train.csv', root_dir='data/gwhd_2021/images/', image_set = 'train', transform=train_transform) 
   vl_dataset = WheatDataset('data/Annots/competition_val.csv', root_dir='data/gwhd_2021/images/', image_set = 'val', transform=valid_transform)
   test_dataset = WheatDataset('data/Annots/competition_test.csv', root_dir='data/gwhd_2021/images/', image_set = 'tes', transform=valid_transform)
   
+  #subsection of datasets for smokescreen training run
   tr_subdataset = Subset(tr_dataset, list(range(32)))
   vl_subdataset = Subset(vl_dataset, list(range(2)))
 
+
+#we have two ways of instantiating
   if args.exp == 'coral':
     # Cross-domain CORAL needs at least two domains in every training batch.
+    #this one instantiates an object for specific batch sampling which ensures at least two domains per batch. 
     coral_batch_sampler = DomainDiverseBatchSampler(
         domain_labels=tr_dataset.domain_index.tolist(),
         batch_size=args.batch_size,
         seed=SEED,
     )
 
+    #in this case, we use that special dataloader during training
     train_dataloader = torch.utils.data.DataLoader(
         tr_dataset,
         batch_sampler=coral_batch_sampler,
         collate_fn=collate_fn,
         num_workers=args.num_workers,
     )
+    #but if we want to run the training without using the coral modules, we use a different dataloader method. both originate from the torch library though.
   else:
     train_dataloader = torch.utils.data.DataLoader(
         tr_dataset,
@@ -677,7 +697,7 @@ if __name__ == '__main__':
         num_workers=args.num_workers,
         drop_last=True,
     )
-
+#validation dataloader always has a batch size of 1. 
   val_dataloader = torch.utils.data.DataLoader(
       vl_dataset,
       batch_size=1,
@@ -685,7 +705,7 @@ if __name__ == '__main__':
       collate_fn=collate_fn,
       num_workers=args.num_workers
   )
-
+#same for test.
   test_dataloader = torch.utils.data.DataLoader(
       test_dataset,
       batch_size=1,
@@ -724,10 +744,12 @@ if __name__ == '__main__':
     checkpoint = torch.load(
         ckpt_path,
         map_location="cpu",
+        #load checkpoint into cpu memory
     )
 
     detector.load_state_dict(
         checkpoint["state_dict"]
+        #update detector with checkpoint weights
     )
 
     if args.eval_split == "val":

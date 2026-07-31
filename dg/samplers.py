@@ -26,15 +26,19 @@ class DomainDiverseBatchSampler(Sampler[List[int]]):
         if batch_size < 2:
             raise ValueError("CORAL training needs batch_size >= 2")
 
+        #makes a dictionary of each sample image, identifying them by position in the dataset and grouping them by domain
         labels = [int(x) for x in domain_labels]
         self.groups = defaultdict(list)
         for idx, domain in enumerate(labels):
             self.groups[domain].append(idx)
 
+        #orders the dictionary numerically by domain, makes it predictable. 
         self.domains = sorted(self.groups.keys())
+        #throws error if there are less than two domains
         if len(self.domains) < 2:
             raise ValueError("At least two training domains are required")
 
+        #throws error if the batch size is larger than the number of domains
         if batch_size > len(self.domains):
             raise ValueError(
                 f"batch_size={batch_size} exceeds number of domains="
@@ -54,12 +58,13 @@ class DomainDiverseBatchSampler(Sampler[List[int]]):
         return self.num_batches
 
     def __iter__(self) -> Iterator[List[int]]:
-        rng = random.Random(self.seed + self.epoch)
+        rng = random.Random(self.seed + self.epoch) #uses seed and epoch as the random seed. for every epoch the collection is different, but every run is ultimately consistent
         self.epoch += 1
 
-        pools = {}
-        cursors = {}
+        pools = {} #shuffled dictionary of entries per domain
+        cursors = {} #pointer for each domain in the pool (index)
 
+        #refills the indexes for one domain. 
         def refill(domain: int):
             values = list(self.groups[domain])
             rng.shuffle(values)
