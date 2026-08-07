@@ -32,7 +32,12 @@ from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import Callback, ModelCheckpoint
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 
-from dg import FRCNNCoralLosses, DomainDiverseBatchSampler
+from dg import (
+    FRCNNCoralLosses,
+    DomainDiverseBatchSampler,
+    DomainCappedBatchSampler,
+    NaturalDomainBatchSampler,
+)
 
 SEED=42
 torch.manual_seed(SEED)
@@ -436,6 +441,19 @@ def parser_args():
   parser.add_argument('--batch_size', default=2, type=int,
                       help='Training batch size. Paper value for GWHD Faster R-CNN is 2.')
 
+  parser.add_argument('--sampler', default='domain_diverse',
+                      choices=['domain_diverse', 'domain_capped', 'natural'],
+                      help="CORAL batch sampling strategy. 'domain_diverse' (original) "
+                           "forces batch_size distinct domains per batch, so samples-per-domain "
+                           "is pinned at 1 regardless of batch_size. 'domain_capped' caps the "
+                           "number of distinct domains per batch at --domains_per_batch, so "
+                           "samples-per-domain grows with batch_size instead. 'natural' uses "
+                           "plain random shuffling (same as the non-DG baseline) with only a "
+                           "minimum-2-domains-per-batch safeguard.")
+
+  parser.add_argument('--domains_per_batch', default=2, type=int,
+                      help="Number of distinct domains per batch when --sampler=domain_capped.")
+
   parser.add_argument('--lr', default=0.001, type=float,
                       help='Learning rate. Paper value for GWHD Faster R-CNN is 0.001.')
 
@@ -673,12 +691,27 @@ if __name__ == '__main__':
 #we have two ways of instantiating
   if args.exp == 'coral':
     # Cross-domain CORAL needs at least two domains in every training batch.
-    #this one instantiates an object for specific batch sampling which ensures at least two domains per batch. 
-    coral_batch_sampler = DomainDiverseBatchSampler(
-        domain_labels=tr_dataset.domain_index.tolist(),
-        batch_size=args.batch_size,
-        seed=SEED,
-    )
+    # --sampler selects how that's enforced; see dg/samplers.py for the
+    # trade-offs between the three strategies.
+    if args.sampler == 'domain_diverse':
+        coral_batch_sampler = DomainDiverseBatchSampler(
+            domain_labels=tr_dataset.domain_index.tolist(),
+            batch_size=args.batch_size,
+            seed=SEED,
+        )
+    elif args.sampler == 'domain_capped':
+        coral_batch_sampler = DomainCappedBatchSampler(
+            domain_labels=tr_dataset.domain_index.tolist(),
+            batch_size=args.batch_size,
+            domains_per_batch=args.domains_per_batch,
+            seed=SEED,
+        )
+    else:
+        coral_batch_sampler = NaturalDomainBatchSampler(
+            domain_labels=tr_dataset.domain_index.tolist(),
+            batch_size=args.batch_size,
+            seed=SEED,
+        )
 
     #in this case, we use that special dataloader during training
     train_dataloader = torch.utils.data.DataLoader(
