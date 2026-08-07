@@ -650,6 +650,14 @@ def parser_args():
         type=int,
     )
 
+    parser.add_argument(
+        "--deterministic",
+        dest="deterministic",
+        action="store_true",
+        help="Enable full determinism (cudnn deterministic algorithms, "
+        "Trainer(deterministic=True)). Default is nondeterministic/benchmark mode.",
+    )
+
     return parser.parse_args()
 
 
@@ -667,11 +675,16 @@ if __name__ == "__main__":
     torch.manual_seed(SEED)
     torch.cuda.manual_seed(SEED)
     torch.cuda.manual_seed_all(SEED)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
-    torch.use_deterministic_algorithms(
-        True
-    )  # This should also include the two before, but I'm not sure.
+
+    if args.deterministic:
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
+        torch.use_deterministic_algorithms(
+            True
+        )  # This should also include the two before, but I'm not sure.
+    else:
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.deterministic = False
 
     NET_FOLDER = args.weights_folder
 
@@ -739,7 +752,7 @@ if __name__ == "__main__":
     trainer = Trainer(
         accelerator="gpu",
         max_epochs=100,
-        deterministic=True,
+        deterministic=args.deterministic,
         callbacks=[checkpoint_callback, early_stop_callback],
         num_sanity_val_steps=2,
     )
