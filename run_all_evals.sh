@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-NET_ROOT="coral_runs"
+NET_ROOT="GWHD_CORAL"
 
 RUN_NAMES=(
   domcap2_bs8_lr1e4_run1
