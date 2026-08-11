@@ -13,12 +13,12 @@ set -euo pipefail
 NET_ROOT="GWHD_CORAL"
 
 RUN_NAMES=(
+  domcap2_bs8_lr1e4_run0
   domcap2_bs8_lr1e4_run1
   domcap2_bs8_lr1e4_run2
-  domcap2_bs8_lr1e4_run3
+  domcap2_bs8_lr1e5_run0
   domcap2_bs8_lr1e5_run1
   domcap2_bs8_lr1e5_run2
-  domcap2_bs8_lr1e5_run3
 )
 
 for run_name in "${RUN_NAMES[@]}"; do
