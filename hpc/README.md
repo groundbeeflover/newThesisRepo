@@ -108,8 +108,15 @@ you burn a multi-hour allocation on a broken environment.
 - `--time`: set generously (e.g. `12:00:00`) since `--max_epochs=100` with early stopping means duration is
   hard to predict up front; check the education partition's max walltime with `scontrol show partition
   education` once you're on the cluster and adjust down if capped.
-- `--partition=education --account=education`: these are the literal values shown in the example script in
-  `slurm_documentation.pdf`. If you were assigned a different partition/account name, swap it in.
+- `--partition=education --account=research`: the docs' example script used `--account=education`, but that's
+  wrong for this account — `scontrol show assoc_mgr users=$USER` showed `DefAccount=research`, no personal
+  association under `education` at all, and the `education` account itself has zero granted `GrpTRES` cluster-
+  wide (an empty scaffold, not actually provisioned). `research` is the account with a real per-user
+  association and budget. `education` the *partition* is still correct — it's flagged default in `sinfo` and
+  is the same physical nodes as the `research` partition anyway. If you ever get an "Invalid account or
+  account/partition combination" error again, re-run `scontrol show assoc_mgr users=$USER` — `sacctmgr` itself
+  is unreachable from the login node on this cluster (connection refused to `slurmdbd`), so `scontrol` is the
+  way to check.
 
 ## 7. Running multiple experiments in parallel
 

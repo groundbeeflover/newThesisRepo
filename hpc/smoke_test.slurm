@@ -10,7 +10,7 @@
 #SBATCH --mem=8G
 #SBATCH --gpus=1
 #SBATCH --partition=education
-#SBATCH --account=education
+#SBATCH --account=research
 
 # Quick sanity check before committing a full run: confirms the venv, CUDA,
 # and GWHD data path all work. 1 epoch, tiny batch, capped steps.

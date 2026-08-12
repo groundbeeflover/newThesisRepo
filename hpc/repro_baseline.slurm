@@ -9,7 +9,7 @@
 #SBATCH --mem=32G
 #SBATCH --gpus=1
 #SBATCH --partition=education
-#SBATCH --account=education
+#SBATCH --account=research
 #SBATCH --array=0-2
 
 # Reproduction of Seemakurthy et al.'s baseline number, using the clean/stock
