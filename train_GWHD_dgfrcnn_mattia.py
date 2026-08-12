@@ -1,7 +1,7 @@
 from __future__ import absolute_import, division, print_function
 
 import math, sys, time, random, os
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
@@ -761,22 +761,28 @@ if __name__ == "__main__":
     )
 
     detector.pr_file = "pr_" + weights_file
+    ckpt_path = os.path.join(NET_FOLDER, weights_file + ".ckpt")
     detector.load_state_dict(
-        torch.load(NET_FOLDER + "/" + weights_file + ".ckpt")["state_dict"]
+        torch.load(ckpt_path)["state_dict"]
     )
     trainer = Trainer(accelerator="gpu", max_epochs=0, num_sanity_val_steps=-1)
     # trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=test_dataloader)
+    # NOTE: previously hardcoded to "GWHD/{args.model_checkpoint}.ckpt", which only worked when
+    # --weights_folder was left at its "GWHD" default and --model-checkpoint was passed in
+    # separately (redundant with --weights_file). Fixed to always resolve from the actual
+    # --weights_folder/--weights_file this run used, so parallel runs into distinct run dirs
+    # (as SLURM launches them) evaluate the checkpoint they just trained, not a stale/missing one.
     print(f"VALIDATION:")
     trainer.validate(
         detector,
         dataloaders=val_dataloader,
-        ckpt_path=f"GWHD/{args.model_checkpoint}.ckpt",
+        ckpt_path=ckpt_path,
     )
     print(f"TEST:")
     trainer.validate(
         detector,
         dataloaders=test_dataloader,
-        ckpt_path=f"GWHD/{args.model_checkpoint}.ckpt",
+        ckpt_path=ckpt_path,
     )
     # trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=train_dataloader)
 
