@@ -9,7 +9,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gpus=1
-#SBATCH --partition=education
+#SBATCH --partition=research
 #SBATCH --account=research
 
 # Usage: sbatch hpc/train_coral.slurm <exp: coral|non_dg> <tag>

@@ -9,7 +9,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=8G
 #SBATCH --gpus=1
-#SBATCH --partition=education
+#SBATCH --partition=research
 #SBATCH --account=research
 
 # Quick sanity check before committing a full run: confirms the venv, CUDA,

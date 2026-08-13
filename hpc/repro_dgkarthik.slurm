@@ -2,13 +2,13 @@
 #SBATCH --job-name=gwhd_repro_dgkarthik
 #SBATCH --output=hpc_logs/stdout-%x-%A_%a.out
 #SBATCH --error=hpc_logs/stderr-%x-%A_%a.err
-#SBATCH --time=01:55:00
+#SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
 #SBATCH --gpus=1
-#SBATCH --partition=education
+#SBATCH --partition=research
 #SBATCH --account=research
 #SBATCH --array=0-2
 
@@ -28,18 +28,19 @@
 #
 # Array index 0/1/2 -> seed 0/1/2, one job per seed, run concurrently.
 #
-# The `education` partition caps walltime at 2h (scontrol show partition
-# education -> MaxTime=02:00:00) -- this run took 35-37 epochs in earlier
-# GRL attempts (grlbaselineruns/), unlikely to finish in one 2h chunk.
-# --time is set to 01:55:00 (5 min buffer) and the training script
-# auto-resumes from runs/.../checkpoints/last.ckpt if present -- so just
-# RESUBMIT THE SAME COMMAND AGAIN after each chunk times out:
+# Runs on the `research` partition (MaxTime=7-00:00:00 -- scontrol show
+# partition research), not `education` (MaxTime=02:00:00, and its
+# AllowAccounts=education excludes this account anyway -- see hpc/README.md
+# §6). 24h is a generous single-shot budget -- this run took 35-37 epochs in
+# earlier GRL attempts (grlbaselineruns/), which fit comfortably inside 24h
+# even at a few minutes/epoch.
 #
-#   sbatch hpc/repro_dgkarthik.slurm
-#
-# Re-running is safe: it either resumes an in-progress seed or, if a seed's
-# WEIGHTS_FILE.done sentinel already exists (see below), skips it as already
-# complete instead of erroring.
+# The training script still checkpoints every epoch and auto-resumes from
+# runs/.../checkpoints/last.ckpt if present, and still only writes
+# WEIGHTS_FILE.done once val/test eval genuinely finishes -- kept as a safety
+# net even though a 24h budget shouldn't need it. Resubmitting the same
+# command is always safe: resumes anything unfinished, skips anything
+# already .done.
 #
 # Usage: sbatch hpc/repro_dgkarthik.slurm [lr]
 #   lr defaults to 1e-5 (the setting with a known target number). Pass 1e-4

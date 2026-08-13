@@ -105,18 +105,20 @@ you burn a multi-hour allocation on a broken environment.
   worker, plus the main process).
 - `--mem=32G`: conservative for image + albumentations augmentation pipeline on GWHD; bump if you see OOM-kill
   in `stderr-*.err`.
-- `--time`: set generously (e.g. `12:00:00`) since `--max_epochs=100` with early stopping means duration is
-  hard to predict up front; check the education partition's max walltime with `scontrol show partition
-  education` once you're on the cluster and adjust down if capped.
-- `--partition=education --account=research`: the docs' example script used `--account=education`, but that's
-  wrong for this account — `scontrol show assoc_mgr users=$USER` showed `DefAccount=research`, no personal
-  association under `education` at all, and the `education` account itself has zero granted `GrpTRES` cluster-
-  wide (an empty scaffold, not actually provisioned). `research` is the account with a real per-user
-  association and budget. `education` the *partition* is still correct — it's flagged default in `sinfo` and
-  is the same physical nodes as the `research` partition anyway. If you ever get an "Invalid account or
-  account/partition combination" error again, re-run `scontrol show assoc_mgr users=$USER` — `sacctmgr` itself
-  is unreachable from the login node on this cluster (connection refused to `slurmdbd`), so `scontrol` is the
-  way to check.
+- `--time`: `24:00:00` in the repro scripts — comfortable single-shot budget confirmed against `scontrol show
+  partition research` (`MaxTime=7-00:00:00`). `train_coral.slurm` (`12:00:00`) and `smoke_test.slurm`
+  (`00:15:00`) are also well inside that cap, no changes needed there.
+- `--partition=research --account=research`: went through two wrong guesses before landing here, worth
+  recording so it isn't relitigated. (1) `--partition=education --account=education`, the docs' literal
+  example — wrong account, `scontrol show assoc_mgr users=$USER` showed `DefAccount=research` and no personal
+  association under `education` at all. (2) `--partition=education --account=research` — account now correct,
+  but `scontrol show partition education` revealed `AllowAccounts=education`: that partition flatly rejects
+  any account other than `education`, so there was never a working combination through it for this user. (3)
+  `--partition=research --account=research` — `scontrol show partition research` confirms
+  `AllowAccounts=research,project`, so this is the account's actual home partition. Confirmed working.
+  `sacctmgr` itself is unreachable from the login node on this cluster (connection refused to `slurmdbd`), so
+  `scontrol show assoc_mgr users=$USER` / `scontrol show partition <name>` are the way to check any of this,
+  not `sacctmgr`.
 
 ## 7. Running multiple experiments in parallel
 
@@ -166,33 +168,32 @@ given. `hpc/repro_dgkarthik.slurm` uses this repo's existing convention (`0.5 0.
 `run_gwhd_dg.sh`) with only the 4th value swapped to 0.055. If Mattia confirms different values for the other
 four, edit `REG_WEIGHTS` at the top of that script before submitting.
 
-**Running it — the `education` partition's 2h walltime cap:**
+**Running it — walltime and the checkpoint/resume workflow:**
 
-`scontrol show partition education` reports `MaxTime=02:00:00` — a hard cap, confirmed by both jobs sitting in
-`squeue` as `PD (PartitionTimeLimit)` when first submitted with 12h/16h requests. Neither script's full run
-(100 epochs, patience-10 early stopping — the earlier `grlbaselineruns` GRL runs needed 35-37 epochs) is
-guaranteed to fit in one 2h chunk, especially the DGKarthik run. So both scripts now:
+These scripts run on the `research` partition (`--account=research`; see the §6 note on why
+`education`/`education` and `education`/`research` both turned out to be dead ends). `scontrol show partition
+research` confirms `MaxTime=7-00:00:00`, so both scripts request a comfortable single-shot `--time=24:00:00` —
+no need to babysit them across multiple submissions the way `education`'s 2h cap would have required.
 
-- Request `--time=01:55:00` (a 5 min buffer under the 2h cap).
-- Checkpoint every epoch to `runs/.../checkpoints/last.ckpt` (`ModelCheckpoint(save_last=True)`), and
-  auto-resume from it at startup if present — full trainer state (weights, optimizer, LR scheduler, epoch
-  count, early-stopping patience counter).
-- Write a `<weights_file>.done` sentinel file only after the final val/test evaluation genuinely completes. The
-  "already exists, abort" guard checks this instead of the checkpoint itself (which now legitimately exists
-  mid-run) — so re-submitting a seed that's still `.done`-less resumes it, and re-submitting one that's already
-  `.done` just skips it cleanly instead of erroring.
+They still checkpoint every epoch and auto-resume, kept as a safety net rather than a load-bearing requirement:
 
-**In practice: submit once, then just keep resubmitting the same command every ~2h until it stops finding
-anything left to resume:**
+- `ModelCheckpoint(save_last=True)` writes `runs/.../checkpoints/last.ckpt` every epoch; the script auto-resumes
+  from it at startup if present — full trainer state (weights, optimizer, LR scheduler, epoch count,
+  early-stopping patience counter). Covers node reboots, preemption, or a future stricter time limit.
+- A `<weights_file>.done` sentinel file is written only after the final val/test evaluation genuinely
+  completes. The "already exists, skip" guard checks this instead of the checkpoint itself (which legitimately
+  exists mid-run) — so re-submitting a seed that's still `.done`-less resumes it, and re-submitting one that's
+  already `.done` just skips it cleanly instead of erroring.
+
+**In practice, just submit once per experiment:**
 
 ```bash
 sbatch hpc/repro_baseline.slurm    # 3 jobs (seeds 0,1,2), lr=1e-5, BS=8, deterministic
 sbatch hpc/repro_dgkarthik.slurm   # 3 jobs (seeds 0,1,2), lr=1e-5, BS=8, alpha_4=0.055, deterministic
-
-# ... 2h later, once squeue shows those array tasks are done ...
-sbatch hpc/repro_baseline.slurm    # same command — resumes seeds still in progress, skips finished ones
-sbatch hpc/repro_dgkarthik.slurm
 ```
+
+If a run ever does get interrupted before finishing, the exact same command resumes it — no separate recovery
+step needed.
 
 Each `sbatch` call is a job array (`--array=0-2`), so all 3 seeds per experiment run concurrently across
 whatever L40s are free. Results land in `runs/gwhd_repro_baseline_lr1e-5/` and `runs/gwhd_repro_dgkarthik_lr1e-5/`,
@@ -206,9 +207,10 @@ through an internal `self.mode` (0→1→2→3) each batch, which is a plain Pyt
 state. A resumed run always restarts at `mode=0` regardless of where it was cut off — harmless (just repeats up
 to 3 extra sub-steps of that batch), not a correctness issue.
 
-`train_coral.slurm` (CORAL runs) still requests `--time=12:00:00` and has no resume/`.done` logic — it'll hit
-the same `PartitionTimeLimit` wall if submitted as-is. Say the word if you want the same treatment applied
-there before you start CORAL runs on the cluster.
+`train_coral.slurm` (CORAL runs) already targets `--partition=research --account=research` and requests
+`--time=12:00:00`, comfortably inside `research`'s 7-day cap — no `PartitionTimeLimit`/`PartitionConfig` issue
+expected there. It doesn't have the checkpoint/resume/`.done` logic the two repro scripts have, since it hasn't
+needed it; say the word if you want that added too (e.g. as extra insurance for very long CORAL sweeps).
 
 Mattia's email also mentions LR=1e-4 was tested (Sheet3 rows 3+5) but doesn't give numbers for it. Both scripts
 take `lr` as an optional first argument if you want to run that comparison too:
