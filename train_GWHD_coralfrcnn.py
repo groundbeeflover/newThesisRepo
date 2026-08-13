@@ -243,7 +243,18 @@ class DGFRCNN(LightningModule):
         self.momentum = 0.9
         self.weight_decay = weight_decay
         self.optimizer_name = optimizer_name
-                
+
+        # Bottleneck-isolation instrumentation (bs2-vs-bs8 CORAL sampling
+        # ablation, Aug 2026). Set from __main__ after the batch_sampler and
+        # weights_folder/weights_file are known; both are optional (None ->
+        # instrumentation is skipped) so this is safe for non_dg/eval runs.
+        self.coral_batch_sampler = None
+        self.domain_hist_csv_path = None
+        self.coral_diag_csv_path = None
+        self._epoch_diag_records = []
+        self._domain_hist_rows = []
+        self._coral_diag_rows = []
+
 
         # Tapping the backbone features and region proposal features and its labels
         self.detector.backbone.register_forward_hook(self.store_backbone_out)
@@ -324,6 +335,8 @@ class DGFRCNN(LightningModule):
             roi_labels_by_image=self.box_labels,
             image_domains=image_domains,
         )
+        diag = coral.pop("diag")
+        self._record_coral_diag(diag)
 
         # reg_weights order:
         # alpha1 image, alpha2 instance, alpha3 consistency,
@@ -370,6 +383,93 @@ class DGFRCNN(LightningModule):
         )
 
       return {"loss": loss}
+
+    def _record_coral_diag(self, diag: dict) -> None:
+        """Stash one training step's pre-cap sample-count diagnostics for
+        epoch-end aggregation (see on_train_epoch_end)."""
+        img_counts = list(diag["image_spatial_counts"].values())
+        roi_counts = list(diag["roi_counts"].values())
+        fg_counts = list(diag["roi_fg_counts"].values())
+
+        record = {
+            "num_domains_present": diag["num_domains_present"],
+            "img_spatial_min": min(img_counts) if img_counts else 0,
+            "img_spatial_mean": (sum(img_counts) / len(img_counts)) if img_counts else 0.0,
+            "roi_min": min(roi_counts) if roi_counts else 0,
+            "roi_mean": (sum(roi_counts) / len(roi_counts)) if roi_counts else 0.0,
+            "roi_fg_min": min(fg_counts) if fg_counts else 0,
+            "roi_fg_mean": (sum(fg_counts) / len(fg_counts)) if fg_counts else 0.0,
+        }
+        self._epoch_diag_records.append(record)
+
+        # Also surface as step-level scalars (Lightning auto-aggregates
+        # on_epoch=True means across the epoch too, redundant with the CSV
+        # below but convenient if you're just watching tensorboard).
+        for name, value in record.items():
+            self.log(
+                f"train/coral_diag_{name}",
+                float(value),
+                on_step=True,
+                on_epoch=True,
+                prog_bar=False,
+                batch_size=1,
+            )
+
+    def on_train_epoch_start(self):
+        self._epoch_diag_records = []
+
+    def on_train_epoch_end(self):
+        """
+        Dump two diagnostic CSVs for the bs2-vs-bs8 sampling ablation, one
+        row appended per epoch:
+
+        - <weights_file>_domain_histogram.csv: per-domain images_drawn /
+          oversample_ratio / times_recycled this epoch, from the active
+          batch_sampler (see dg/samplers.py get_last_epoch_stats()).
+        - <weights_file>_coral_diag.csv: epoch-mean of the per-step pre-cap
+          sample counts recorded by _record_coral_diag, i.e. whether the
+          2048/256 sample caps were actually binding and how scarce
+          foreground ROIs were per domain.
+
+        Both are no-ops if the corresponding path/sampler wasn't wired up
+        from __main__ (e.g. non_dg runs, or eval-only invocations).
+        """
+        epoch_idx = self.current_epoch
+
+        if self.coral_batch_sampler is not None and self.domain_hist_csv_path is not None:
+            if hasattr(self.coral_batch_sampler, "get_last_epoch_stats"):
+                for row in self.coral_batch_sampler.get_last_epoch_stats():
+                    row = dict(row)
+                    row["epoch"] = epoch_idx
+                    self._domain_hist_rows.append(row)
+
+                hist_df = pd.DataFrame(self._domain_hist_rows)
+                hist_df.to_csv(self.domain_hist_csv_path, index=False)
+
+                oversample_ratios = [
+                    r["oversample_ratio"] for r in self._domain_hist_rows
+                    if r["epoch"] == epoch_idx
+                ]
+                if oversample_ratios:
+                    self.log(
+                        "epoch_domain_oversample_max",
+                        float(max(oversample_ratios)),
+                        on_step=False,
+                        on_epoch=True,
+                        prog_bar=False,
+                    )
+
+        if self.coral_diag_csv_path is not None and self._epoch_diag_records:
+            keys = self._epoch_diag_records[0].keys()
+            means = {
+                k: sum(r[k] for r in self._epoch_diag_records) / len(self._epoch_diag_records)
+                for k in keys
+            }
+            means["epoch"] = epoch_idx
+            self._coral_diag_rows.append(means)
+
+            diag_df = pd.DataFrame(self._coral_diag_rows)
+            diag_df.to_csv(self.coral_diag_csv_path, index=False)
 
     def validation_step(self, batch, batch_idx):
     
@@ -865,13 +965,20 @@ if __name__ == '__main__':
   
   #detector = DGFRCNN(2, 8, args.exp, args.reg_weights)
 
-  if os.path.exists(NET_FOLDER+'/'+weights_file+'.ckpt'): 
+  if os.path.exists(NET_FOLDER+'/'+weights_file+'.ckpt'):
     detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])
-  else:	
+  else:
     if not os.path.exists(NET_FOLDER):
       os.mkdir(NET_FOLDER, 0o777)
 
-  
+  # Bottleneck-isolation instrumentation: wire the batch_sampler and output
+  # paths into the module so on_train_epoch_end can dump the domain-histogram
+  # and coral-diag CSVs (see dg/samplers.py, DGFRCNN.on_train_epoch_end).
+  if args.exp == 'coral':
+    detector.coral_batch_sampler = coral_batch_sampler
+    detector.domain_hist_csv_path = os.path.join(NET_FOLDER, f"{weights_file}_domain_histogram.csv")
+    detector.coral_diag_csv_path = os.path.join(NET_FOLDER, f"{weights_file}_coral_diag.csv")
+
   early_stop_callback= EarlyStopping(monitor='val_acc', min_delta=0.00, patience=10, verbose=False, mode='max')
   checkpoint_callback = ModelCheckpoint(monitor='val_acc', dirpath=NET_FOLDER, filename=weights_file, mode='max')
   

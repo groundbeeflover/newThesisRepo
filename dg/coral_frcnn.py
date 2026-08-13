@@ -65,6 +65,22 @@ class FRCNNCoralLosses(nn.Module):
         return [bank[k] for k in keys if k in bank and bank[k] is not None]
 
     @staticmethod
+    def _pre_cap_counts(domains: torch.Tensor) -> Dict[int, int]:
+        """Per-domain row counts *before* sample_rows() truncates to the cap.
+
+        Used to check whether max_spatial_samples_per_domain /
+        max_roi_samples_per_group are actually binding at a given
+        samples-per-domain batch composition, or whether a single image
+        already saturates them (see bs2-vs-bs8 sampling ablation notes).
+        """
+        if domains.numel() == 0:
+            return {}
+        return {
+            int(d.item()): int((domains == d).sum().item())
+            for d in torch.unique(domains)
+        }
+
+    @staticmethod
     def _alignment_or_zero(
         covs: List[torch.Tensor],
         reference: torch.Tensor,
@@ -293,10 +309,26 @@ class FRCNNCoralLosses(nn.Module):
             else zero_loss(roi_x)
         )
 
+        # Diagnostics for the bs2-vs-bs8 sampling ablation: pre-cap sample
+        # counts per domain, so it's possible to tell directly (instead of
+        # inferring) whether max_spatial_samples_per_domain /
+        # max_roi_samples_per_group are binding, and whether foreground ROI
+        # scarcity (not background) is the real limiter for ds_adv/ds_cls.
+        # roi_y == 1 is the foreground/wheat-head class; 0 is background.
+        fg_mask = roi_y == 1
+        diag = {
+            "num_domains_present": len(present_domains),
+            "num_classes_present": len(present_classes),
+            "image_spatial_counts": self._pre_cap_counts(image_d),
+            "roi_counts": self._pre_cap_counts(roi_d),
+            "roi_fg_counts": self._pre_cap_counts(roi_d[fg_mask]) if fg_mask.any() else {},
+        }
+
         return {
             "img": loss_img,
             "ins": loss_ins,
             "cst": loss_cst,
             "ds_adv": loss_ds_adv,
             "ds_cls": loss_ds_cls,
+            "diag": diag,
         }

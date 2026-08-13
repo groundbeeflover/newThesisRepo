@@ -2,9 +2,36 @@ from __future__ import annotations
 
 import random
 from collections import defaultdict
-from typing import Iterator, List
+from typing import Dict, Iterator, List
 
 from torch.utils.data import Sampler
+
+
+def _epoch_stats(domains: List[int], group_sizes: Dict[int, int],
+                  image_counts: Dict[int, int], refill_counts: Dict[int, int]) -> List[dict]:
+    """
+    Shared helper for the bottleneck-isolation diagnostics (see thesis notes on
+    CORAL bs2-vs-bs8 sampling ablation, Aug 2026).
+
+    images_drawn / domain_size = how many times that domain's images were
+    revisited this epoch in expectation terms; refill_count - 1 = how many
+    times its pool was fully exhausted and reshuffled mid-epoch (0 means it
+    never wrapped around). Both are logged per-domain so oversampling can be
+    read off directly instead of inferred from batch_size alone.
+    """
+    rows = []
+    for d in domains:
+        size = group_sizes.get(d, 0)
+        drawn = image_counts.get(d, 0)
+        refills = refill_counts.get(d, 0)
+        rows.append({
+            "domain": d,
+            "domain_size": size,
+            "images_drawn": drawn,
+            "times_recycled": max(refills - 1, 0),
+            "oversample_ratio": (drawn / size) if size else float("nan"),
+        })
+    return rows
 
 
 class DomainDiverseBatchSampler(Sampler[List[int]]):
@@ -62,23 +89,34 @@ class DomainDiverseBatchSampler(Sampler[List[int]]):
         )
         self.seed = seed
         self.epoch = 0
+        self._image_counts: Dict[int, int] = {}
+        self._refill_counts: Dict[int, int] = {}
 
     def __len__(self) -> int:
         return self.num_batches
+
+    def get_last_epoch_stats(self) -> List[dict]:
+        """Per-domain oversampling stats for the most recently completed epoch."""
+        group_sizes = {d: len(self.groups[d]) for d in self.domains}
+        return _epoch_stats(self.domains, group_sizes, self._image_counts, self._refill_counts)
 
     def __iter__(self) -> Iterator[List[int]]:
         rng = random.Random(self.seed + self.epoch) #uses seed and epoch as the random seed. for every epoch the collection is different, but every run is ultimately consistent
         self.epoch += 1
 
+        self._image_counts = {d: 0 for d in self.domains}
+        self._refill_counts = {d: 0 for d in self.domains}
+
         pools = {} #shuffled dictionary of entries per domain
         cursors = {} #pointer for each domain in the pool (index)
 
-        #refills the indexes for one domain. 
+        #refills the indexes for one domain.
         def refill(domain: int):
             values = list(self.groups[domain])
             rng.shuffle(values)
             pools[domain] = values
             cursors[domain] = 0
+            self._refill_counts[domain] += 1
 
         for domain in self.domains:
             refill(domain)
@@ -93,6 +131,7 @@ class DomainDiverseBatchSampler(Sampler[List[int]]):
 
                 batch.append(pools[domain][cursors[domain]])
                 cursors[domain] += 1
+                self._image_counts[domain] += 1
 
             yield batch
 
@@ -157,13 +196,23 @@ class DomainCappedBatchSampler(Sampler[List[int]]):
         )
         self.seed = seed
         self.epoch = 0
+        self._image_counts: Dict[int, int] = {}
+        self._refill_counts: Dict[int, int] = {}
 
     def __len__(self) -> int:
         return self.num_batches
 
+    def get_last_epoch_stats(self) -> List[dict]:
+        """Per-domain oversampling stats for the most recently completed epoch."""
+        group_sizes = {d: len(self.groups[d]) for d in self.domains}
+        return _epoch_stats(self.domains, group_sizes, self._image_counts, self._refill_counts)
+
     def __iter__(self) -> Iterator[List[int]]:
         rng = random.Random(self.seed + self.epoch)
         self.epoch += 1
+
+        self._image_counts = {d: 0 for d in self.domains}
+        self._refill_counts = {d: 0 for d in self.domains}
 
         pools = {}
         cursors = {}
@@ -173,6 +222,7 @@ class DomainCappedBatchSampler(Sampler[List[int]]):
             rng.shuffle(values)
             pools[domain] = values
             cursors[domain] = 0
+            self._refill_counts[domain] += 1
 
         for domain in self.domains:
             refill(domain)
@@ -192,6 +242,7 @@ class DomainCappedBatchSampler(Sampler[List[int]]):
                         refill(domain)
                     batch.append(pools[domain][cursors[domain]])
                     cursors[domain] += 1
+                    self._image_counts[domain] += 1
 
             rng.shuffle(batch)
             yield batch
@@ -253,13 +304,30 @@ class NaturalDomainBatchSampler(Sampler[List[int]]):
         self.seed = seed
         self.epoch = 0
         self.ensure_min_domains = ensure_min_domains
+        self._image_counts: Dict[int, int] = {}
+        self._wraparound_count = 0
 
     def __len__(self) -> int:
         return self.num_batches
 
+    def get_last_epoch_stats(self) -> List[dict]:
+        """
+        Per-domain draw stats for the most recently completed epoch. Unlike
+        the two domain-balanced samplers, there's no per-domain pool/refill
+        here -- "times_recycled" is reported as the single shared full-dataset
+        wraparound count (same for every domain, since it's one global
+        shuffled index list, not per-domain pools).
+        """
+        group_sizes = {d: len(self.by_domain[d]) for d in self.domains}
+        refill_counts = {d: self._wraparound_count for d in self.domains}
+        return _epoch_stats(self.domains, group_sizes, self._image_counts, refill_counts)
+
     def __iter__(self) -> Iterator[List[int]]:
         rng = random.Random(self.seed + self.epoch)
         self.epoch += 1
+
+        self._image_counts = {d: 0 for d in self.domains}
+        self._wraparound_count = 0
 
         order = list(range(self.n))
         rng.shuffle(order)
@@ -272,6 +340,7 @@ class NaturalDomainBatchSampler(Sampler[List[int]]):
                 order = list(range(self.n))
                 rng.shuffle(order)
                 cursor = 0
+                self._wraparound_count += 1
 
             batch = order[cursor: cursor + self.batch_size]
             cursor += self.batch_size
@@ -284,5 +353,8 @@ class NaturalDomainBatchSampler(Sampler[List[int]]):
                         [d for d in self.domains if d != only_domain]
                     )
                     batch[0] = rng.choice(self.by_domain[other_domain])
+
+            for idx in batch:
+                self._image_counts[self.labels[idx]] += 1
 
             yield batch
