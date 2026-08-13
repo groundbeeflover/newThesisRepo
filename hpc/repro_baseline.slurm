@@ -2,7 +2,7 @@
 #SBATCH --job-name=gwhd_repro_baseline
 #SBATCH --output=hpc_logs/stdout-%x-%A_%a.out
 #SBATCH --error=hpc_logs/stderr-%x-%A_%a.err
-#SBATCH --time=12:00:00
+#SBATCH --time=01:55:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
@@ -19,6 +19,19 @@
 # Target from Mattia's runs: avg test mAP@0.5 ~= 54.7 (see hpc/README.md).
 #
 # Array index 0/1/2 -> seed 0/1/2, one job per seed, run concurrently.
+#
+# The `education` partition caps walltime at 2h (scontrol show partition
+# education -> MaxTime=02:00:00), well short of what 100 epochs with
+# patience-10 early stopping needs. --time is set to 01:55:00 (5 min buffer
+# for env setup + checkpoint writing) and the training script auto-resumes
+# from runs/.../checkpoints/last.ckpt if present -- so just RESUBMIT THE SAME
+# COMMAND AGAIN after each 2h chunk times out, as many times as it takes:
+#
+#   sbatch hpc/repro_baseline.slurm
+#
+# Re-running is safe: it either resumes an in-progress seed or, if a seed's
+# WEIGHTS_FILE.done sentinel already exists (see below), skips it as already
+# complete instead of erroring.
 #
 # Usage: sbatch hpc/repro_baseline.slurm [lr]
 #   lr defaults to 1e-5 (the setting with a known target number). Pass 1e-4
@@ -47,10 +60,10 @@ pip freeze > "${RUN_DIR}/config_snapshot/pip_freeze_seed${SEED}.txt"
 nvidia-smi > "${RUN_DIR}/config_snapshot/nvidia_smi_seed${SEED}.txt" || true
 git rev-parse HEAD > "${RUN_DIR}/config_snapshot/git_commit.txt" 2>/dev/null || true
 
-if [ -f "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.ckpt" ]; then
-  echo "ERROR: Checkpoint already exists: ${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.ckpt"
-  echo "Delete it first if you want to rerun this seed."
-  exit 1
+if [ -f "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.done" ]; then
+  echo "Seed ${SEED} already completed (found ${WEIGHTS_FILE}.done). Skipping."
+  echo "Delete that file first if you want to force a rerun from scratch."
+  exit 0
 fi
 
 # NOTE: launched with srun so PyTorch Lightning's auto-detected SLURMEnvironment

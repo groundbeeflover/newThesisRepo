@@ -405,8 +405,13 @@ if __name__ == "__main__":
     early_stop_callback = EarlyStopping(
         monitor="val_acc", min_delta=0.00, patience=10, verbose=False, mode="max"
     )
+    # save_last=True: writes NET_FOLDER/last.ckpt every epoch (in addition to the
+    # best-val_acc checkpoint under `weights_file`). This is what lets a run resume
+    # cleanly across multiple SLURM submissions when the partition's walltime cap
+    # (e.g. education = 2h) is shorter than a full training run.
     checkpoint_callback = ModelCheckpoint(
-        monitor="val_acc", dirpath=NET_FOLDER, filename=weights_file, mode="max"
+        monitor="val_acc", dirpath=NET_FOLDER, filename=weights_file, mode="max",
+        save_last=True,
     )
 
     trainer = Trainer(
@@ -416,8 +421,22 @@ if __name__ == "__main__":
         callbacks=[checkpoint_callback, early_stop_callback],
         num_sanity_val_steps=2,
     )
+
+    # Resume from the last checkpoint if this is a re-submission of a run that
+    # got cut off by the walltime limit (full trainer state: weights, optimizer,
+    # LR scheduler, epoch count, early-stopping patience counter).
+    last_ckpt_path = os.path.join(NET_FOLDER, "last.ckpt")
+    resume_from = last_ckpt_path if os.path.exists(last_ckpt_path) else None
+    if resume_from:
+        print(f"Resuming from checkpoint: {resume_from}")
+    else:
+        print("No existing checkpoint found, starting from scratch.")
+
     trainer.fit(
-        detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader
+        detector,
+        train_dataloaders=train_dataloader,
+        val_dataloaders=val_dataloader,
+        ckpt_path=resume_from,
     )
 
     ckpt_path = os.path.join(NET_FOLDER, weights_file + ".ckpt")
@@ -430,3 +449,9 @@ if __name__ == "__main__":
 
     print("TEST:")
     eval_trainer.validate(detector, dataloaders=test_dataloader, ckpt_path=ckpt_path)
+
+    # Sentinel file so the SLURM wrapper can tell "training+eval genuinely finished"
+    # apart from "best checkpoint exists but the run was cut off mid-training and
+    # needs resubmitting to resume".
+    with open(os.path.join(NET_FOLDER, weights_file + ".done"), "w") as f:
+        f.write("done\n")

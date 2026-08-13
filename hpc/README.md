@@ -166,19 +166,49 @@ given. `hpc/repro_dgkarthik.slurm` uses this repo's existing convention (`0.5 0.
 `run_gwhd_dg.sh`) with only the 4th value swapped to 0.055. If Mattia confirms different values for the other
 four, edit `REG_WEIGHTS` at the top of that script before submitting.
 
-**Running it:**
+**Running it — the `education` partition's 2h walltime cap:**
+
+`scontrol show partition education` reports `MaxTime=02:00:00` — a hard cap, confirmed by both jobs sitting in
+`squeue` as `PD (PartitionTimeLimit)` when first submitted with 12h/16h requests. Neither script's full run
+(100 epochs, patience-10 early stopping — the earlier `grlbaselineruns` GRL runs needed 35-37 epochs) is
+guaranteed to fit in one 2h chunk, especially the DGKarthik run. So both scripts now:
+
+- Request `--time=01:55:00` (a 5 min buffer under the 2h cap).
+- Checkpoint every epoch to `runs/.../checkpoints/last.ckpt` (`ModelCheckpoint(save_last=True)`), and
+  auto-resume from it at startup if present — full trainer state (weights, optimizer, LR scheduler, epoch
+  count, early-stopping patience counter).
+- Write a `<weights_file>.done` sentinel file only after the final val/test evaluation genuinely completes. The
+  "already exists, abort" guard checks this instead of the checkpoint itself (which now legitimately exists
+  mid-run) — so re-submitting a seed that's still `.done`-less resumes it, and re-submitting one that's already
+  `.done` just skips it cleanly instead of erroring.
+
+**In practice: submit once, then just keep resubmitting the same command every ~2h until it stops finding
+anything left to resume:**
 
 ```bash
 sbatch hpc/repro_baseline.slurm    # 3 jobs (seeds 0,1,2), lr=1e-5, BS=8, deterministic
 sbatch hpc/repro_dgkarthik.slurm   # 3 jobs (seeds 0,1,2), lr=1e-5, BS=8, alpha_4=0.055, deterministic
+
+# ... 2h later, once squeue shows those array tasks are done ...
+sbatch hpc/repro_baseline.slurm    # same command — resumes seeds still in progress, skips finished ones
+sbatch hpc/repro_dgkarthik.slurm
 ```
 
-Each is a SLURM job array (`--array=0-2`), so all 3 seeds per experiment run concurrently across whatever L40s
-are free. Results land in `runs/gwhd_repro_baseline_lr1e-5/` and `runs/gwhd_repro_dgkarthik_lr1e-5/`, each with
-per-seed `checkpoints/`, `logs/train_seed<N>.log`, and a `config_snapshot/` (matching the `pip_freeze`/
-`nvidia_smi`/git-commit convention used elsewhere in `hpc/`). To compare against Mattia's 54.7/60.3, look for
-the `val_acc` value printed right after the `TEST:` marker in each seed's log (same convention the earlier
-`grlbaselineruns` analysis used) and average across the 3 seeds.
+Each `sbatch` call is a job array (`--array=0-2`), so all 3 seeds per experiment run concurrently across
+whatever L40s are free. Results land in `runs/gwhd_repro_baseline_lr1e-5/` and `runs/gwhd_repro_dgkarthik_lr1e-5/`,
+each with per-seed `checkpoints/` (`last.ckpt`, the best-`val_acc` checkpoint, and eventually `.done`),
+`logs/train_seed<N>.log`, and a `config_snapshot/`. A seed is fully finished once its `.done` file exists (or
+equivalently, once `TEST:` and a `val_acc` line appear near the end of its log) — average the 3 seeds' test
+`val_acc` and compare against Mattia's 54.7/60.3.
+
+One known gap in the resume logic for `train_GWHD_dgfrcnn_mattia.py` specifically: its `training_step` cycles
+through an internal `self.mode` (0→1→2→3) each batch, which is a plain Python int, not part of the checkpointed
+state. A resumed run always restarts at `mode=0` regardless of where it was cut off — harmless (just repeats up
+to 3 extra sub-steps of that batch), not a correctness issue.
+
+`train_coral.slurm` (CORAL runs) still requests `--time=12:00:00` and has no resume/`.done` logic — it'll hit
+the same `PartitionTimeLimit` wall if submitted as-is. Say the word if you want the same treatment applied
+there before you start CORAL runs on the cluster.
 
 Mattia's email also mentions LR=1e-4 was tested (Sheet3 rows 3+5) but doesn't give numbers for it. Both scripts
 take `lr` as an optional first argument if you want to run that comparison too:
