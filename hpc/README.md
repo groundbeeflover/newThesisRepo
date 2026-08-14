@@ -219,3 +219,14 @@ take `lr` as an optional first argument if you want to run that comparison too:
 sbatch hpc/repro_baseline.slurm 1e-4
 sbatch hpc/repro_dgkarthik.slurm 1e-4
 ```
+
+**RunPod alternative:** the `research` partition queue turned out to have ~250 jobs from another user ahead of
+these (see the priority/queue discussion — flat `PRIORITY=1` on everything, so effectively FIFO by submission
+order, and both GPU worker nodes were already fully occupied by that user's running jobs). If the cluster queue
+isn't moving, `../run_repro_baseline.sh` and `../run_repro_dgkarthik.sh` in the repo root run the identical
+seeds/hyperparameters on a RunPod pod instead — same conda-detection convention as `run_gwhd_dg.sh`/
+`run_gwhd_baseline.sh`, same `runs/gwhd_repro_*_lr<LR>/` layout, so results from either source are directly
+comparable. Seeds run sequentially by default (a single pod GPU may not fit 3 concurrent BS=8 trainings) and
+still checkpoint/resume via the same `last.ckpt`/`.done` mechanism, which matters more here than on the cluster
+if you're using an interruptible/spot RunPod instance. Unlike `sbatch`, these are plain foreground bash
+processes — run them inside `tmux`/`screen` (or `nohup`) so they survive an SSH disconnect.
