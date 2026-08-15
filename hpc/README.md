@@ -190,6 +190,7 @@ They still checkpoint every epoch and auto-resume, kept as a safety net rather t
 ```bash
 sbatch hpc/repro_baseline.slurm    # 3 jobs (seeds 0,1,2), lr=1e-5, BS=8, deterministic
 sbatch hpc/repro_dgkarthik.slurm   # 3 jobs (seeds 0,1,2), lr=1e-5, BS=8, alpha_4=0.055, deterministic
+sbatch hpc/repro_coral.slurm       # 3 jobs (seeds 0,1,2), lr=1e-5, BS=8, reg_weights ...0.075..., deterministic
 ```
 
 If a run ever does get interrupted before finishing, the exact same command resumes it — no separate recovery
@@ -210,7 +211,17 @@ to 3 extra sub-steps of that batch), not a correctness issue.
 `train_coral.slurm` (CORAL runs) already targets `--partition=research --account=research` and requests
 `--time=12:00:00`, comfortably inside `research`'s 7-day cap — no `PartitionTimeLimit`/`PartitionConfig` issue
 expected there. It doesn't have the checkpoint/resume/`.done` logic the two repro scripts have, since it hasn't
-needed it; say the word if you want that added too (e.g. as extra insurance for very long CORAL sweeps).
+needed it for the shorter ablation-grid runs it's used for.
+
+`train_GWHD_coralfrcnn.py` itself now has the same `--seed`/`--deterministic`/`--accumulate_grad_batches` flags
+and `last.ckpt`-based auto-resume as the two repro scripts (added Aug 2026, so CORAL runs can be made fully
+deterministic without regressing on interrupted-run recovery). `hpc/repro_coral.slurm` and
+`../run_repro_coral.sh` are the CORAL siblings of `repro_baseline`/`repro_dgkarthik` above — same
+BS=8/LR=1e-5/seeds-0-1-2/deterministic setup, `reg_weights 0.5 0.5 0.5 0.075 0.0001` (this repo's existing CORAL
+convention, not a Mattia-confirmed value the way `alpha_4=0.055` is for DGKarthik), `--sampler domain_diverse`
+(the original algorithm). Unlike the other two, there's no external paper target number for CORAL to check
+against — these exist so all three deterministic BS=8 runs are directly comparable to each other, not to
+reproduce a specific published number.
 
 Mattia's email also mentions LR=1e-4 was tested (Sheet3 rows 3+5) but doesn't give numbers for it. Both scripts
 take `lr` as an optional first argument if you want to run that comparison too:
@@ -223,18 +234,21 @@ sbatch hpc/repro_dgkarthik.slurm 1e-4
 **RunPod alternative:** the `research` partition queue turned out to have ~250 jobs from another user ahead of
 these (see the priority/queue discussion — flat `PRIORITY=1` on everything, so effectively FIFO by submission
 order, and both GPU worker nodes were already fully occupied by that user's running jobs). If the cluster queue
-isn't moving, `../run_repro_baseline.sh` and `../run_repro_dgkarthik.sh` in the repo root run the identical
-seeds/hyperparameters on a RunPod pod instead — same conda-detection convention as `run_gwhd_dg.sh`/
-`run_gwhd_baseline.sh`, same `runs/gwhd_repro_*_lr<LR>/` layout, so results from either source are directly
-comparable. Seeds run sequentially by default (a single pod GPU may not fit 3 concurrent BS=8 trainings) and
-still checkpoint/resume via the same `last.ckpt`/`.done` mechanism, which matters more here than on the cluster
-if you're using an interruptible/spot RunPod instance. Unlike `sbatch`, these are plain foreground bash
-processes — run them inside `tmux`/`screen` (or `nohup`) so they survive an SSH disconnect.
+isn't moving, `../run_repro_baseline.sh`, `../run_repro_dgkarthik.sh`, and `../run_repro_coral.sh` in the repo
+root run the identical seeds/hyperparameters on a RunPod pod instead — same conda-detection convention as
+`run_gwhd_dg.sh`/`run_gwhd_baseline.sh`, same `runs/gwhd_repro_*_lr<LR>/` layout, so results from either source
+are directly comparable. Seeds run sequentially by default (a single pod GPU may not fit 3 concurrent BS=8
+trainings) and still checkpoint/resume via the same `last.ckpt`/`.done` mechanism, which matters more here than
+on the cluster if you're using an interruptible/spot RunPod instance. Unlike `sbatch`, these are plain
+foreground bash processes — run them inside `tmux`/`screen` (or `nohup`) so they survive an SSH disconnect.
 
 **`torch.OutOfMemoryError` on a 24GB pod GPU (RTX 4090 / A4500 / etc.):** real, not a bug — BS=8 at 1024x1024 is
 a genuinely tight fit on a 24GB card (the university cluster's L40s have 48GB, so this hadn't come up there).
-Both training scripts now accept `--batch_size` (was hardcoded to 8 in `train_GWHD_dgfrcnn_mattia.py`, now
-overridable) and `--accumulate_grad_batches` (Lightning gradient accumulation), and both `run_repro_*.sh`
+Deterministic mode makes this worse for CORAL specifically: `cudnn.deterministic=True` and
+`torch.use_deterministic_algorithms(True)` disable the fastest (and often lower-memory) conv algorithms, so a
+BS=8 CORAL run that fit fine non-deterministically can overshoot VRAM once `--deterministic` is set. All three
+training scripts now accept `--batch_size` (was hardcoded to 8 in `train_GWHD_dgfrcnn_mattia.py`, now
+overridable) and `--accumulate_grad_batches` (Lightning gradient accumulation), and all three `run_repro_*.sh`
 already export `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (a free fix specifically for allocator
 fragmentation — check whether the OOM message's "reserved but unallocated" figure is large; if so this alone
 may fix it). If the physical batch itself is just too big for the card, split it via env vars without editing
