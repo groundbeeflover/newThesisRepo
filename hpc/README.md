@@ -230,3 +230,23 @@ comparable. Seeds run sequentially by default (a single pod GPU may not fit 3 co
 still checkpoint/resume via the same `last.ckpt`/`.done` mechanism, which matters more here than on the cluster
 if you're using an interruptible/spot RunPod instance. Unlike `sbatch`, these are plain foreground bash
 processes — run them inside `tmux`/`screen` (or `nohup`) so they survive an SSH disconnect.
+
+**`torch.OutOfMemoryError` on a 24GB pod GPU (RTX 4090 / A4500 / etc.):** real, not a bug — BS=8 at 1024x1024 is
+a genuinely tight fit on a 24GB card (the university cluster's L40s have 48GB, so this hadn't come up there).
+Both training scripts now accept `--batch_size` (was hardcoded to 8 in `train_GWHD_dgfrcnn_mattia.py`, now
+overridable) and `--accumulate_grad_batches` (Lightning gradient accumulation), and both `run_repro_*.sh`
+already export `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (a free fix specifically for allocator
+fragmentation — check whether the OOM message's "reserved but unallocated" figure is large; if so this alone
+may fix it). If the physical batch itself is just too big for the card, split it via env vars without editing
+the scripts, keeping `PHYS_BATCH * ACCUM_STEPS = 8` to preserve the reproduction's effective batch size:
+
+```bash
+PHYS_BATCH=4 ACCUM_STEPS=2 bash run_repro_baseline.sh
+```
+
+Caveat: this is not bit-identical to a true single-step BS=8 forward pass — any non-frozen BatchNorm layers in
+the backbone compute statistics per physical step (4 images), not per effective batch (8). Close enough for
+this purpose, but worth knowing about if results land slightly off from a run that never needed to split.
+Deliberately did *not* reach for reducing `--batch_size` outright (changes the reproduction, since BS=8 is one
+of Mattia's stated parameters) or mixed-precision training (changes numerics, and Mattia's own script trains in
+plain fp32 with no `precision=` argument set — matching that exactly is the point of a reproduction run).

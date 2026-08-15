@@ -323,6 +323,16 @@ def parser_args():
     parser.add_argument("--num_workers", dest="num_workers", default=16, type=int)
     parser.add_argument("--max_epochs", dest="max_epochs", default=100, type=int)
     parser.add_argument(
+        "--accumulate_grad_batches", dest="accumulate_grad_batches", default=1, type=int,
+        help="Lightning gradient accumulation steps. Use this to hit a target *effective* "
+        "batch size (--batch_size * this value) on a GPU too small to fit it in one physical "
+        "step -- e.g. --batch_size 4 --accumulate_grad_batches 2 for an effective BS=8 on a "
+        "24GB card. Default 1 = no accumulation, matches --batch_size exactly (unchanged "
+        "behavior). Note this is not bit-identical to a true single-step BS=8 forward pass: "
+        "any non-frozen BatchNorm layers in the backbone compute statistics per physical step, "
+        "not per effective batch.",
+    )
+    parser.add_argument(
         "--seed", dest="seed", default=42, type=int,
         help="Seed value for removing randomicity.",
     )
@@ -418,6 +428,7 @@ if __name__ == "__main__":
         accelerator="gpu",
         max_epochs=args.max_epochs,
         deterministic=args.deterministic,
+        accumulate_grad_batches=args.accumulate_grad_batches,
         callbacks=[checkpoint_callback, early_stop_callback],
         num_sanity_val_steps=2,
     )

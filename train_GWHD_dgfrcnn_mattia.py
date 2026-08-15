@@ -643,6 +643,22 @@ def parser_args():
     )
 
     parser.add_argument(
+        "--batch_size", dest="batch_size", default=8, type=int,
+        help="Physical per-step batch size (was hardcoded to 8; now overridable). "
+        "Combine with --accumulate_grad_batches to hit an effective batch size (e.g. "
+        "--batch_size 4 --accumulate_grad_batches 2 for effective BS=8) if the full "
+        "physical batch OOMs on a smaller GPU.",
+    )
+
+    parser.add_argument(
+        "--accumulate_grad_batches", dest="accumulate_grad_batches", default=1, type=int,
+        help="Lightning gradient accumulation steps. Default 1 = no accumulation, "
+        "unchanged behavior. Not bit-identical to a true single-step forward pass at the "
+        "effective batch size: any non-frozen BatchNorm layers compute statistics per "
+        "physical step, not per effective batch.",
+    )
+
+    parser.add_argument(
         "--seed",
         dest="seed",
         help="Seed value for removing randomicity",
@@ -711,7 +727,7 @@ if __name__ == "__main__":
         transform=valid_transform,
     )
 
-    BATCH_SIZE = 8
+    BATCH_SIZE = args.batch_size
 
     train_dataloader = torch.utils.data.DataLoader(
         tr_dataset,
@@ -758,6 +774,7 @@ if __name__ == "__main__":
         accelerator="gpu",
         max_epochs=100,
         deterministic=args.deterministic,
+        accumulate_grad_batches=args.accumulate_grad_batches,
         callbacks=[checkpoint_callback, early_stop_callback],
         num_sanity_val_steps=2,
     )

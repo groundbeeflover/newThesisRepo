@@ -27,15 +27,38 @@ set -euo pipefail
 #   lr defaults to 1e-5 (the setting with a known target number). Pass 1e-4
 #   to run the other row Mattia mentions exists in the sheet (Sheet3, rows
 #   3+5) -- no target number for that one has been shared yet.
+#
+# If you hit `torch.OutOfMemoryError` (common on a 24GB card at BS=8, 1024x1024
+# images -- this is a real, tight fit, not a bug): two independent levers,
+# both settable via env vars without editing this file:
+#
+#   PHYS_BATCH / ACCUM_STEPS -- split the effective BS=8 into smaller physical
+#   steps accumulated together (e.g. PHYS_BATCH=4 ACCUM_STEPS=2 = effective 8,
+#   half the peak memory). Keep PHYS_BATCH * ACCUM_STEPS = 8 to preserve the
+#   reproduction's effective batch size. Default PHYS_BATCH=8 ACCUM_STEPS=1 is
+#   unchanged behavior.
+#
+#   Example: PHYS_BATCH=4 ACCUM_STEPS=2 bash run_repro_baseline.sh
+#
+# The PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True set below is a free,
+# semantics-preserving fix for memory *fragmentation* specifically (look for
+# "reserved but unallocated" in the OOM error -- if that number is large, this
+# is the fix; if it's the PHYS_BATCH that's actually too big, it won't help on
+# its own, use PHYS_BATCH/ACCUM_STEPS above too).
 
 LR="${1:-1e-5}"
 ENV_NAME="DGOD"
 SEEDS=(0 1 2)
+PHYS_BATCH="${PHYS_BATCH:-8}"
+ACCUM_STEPS="${ACCUM_STEPS:-1}"
+
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 RUN_NAME="gwhd_repro_baseline_lr${LR}"
 RUN_DIR="runs/${RUN_NAME}"
 
 echo "Starting clean-baseline reproduction (lr=${LR}), seeds: ${SEEDS[*]}"
+echo "Physical batch=${PHYS_BATCH}, accumulate_grad_batches=${ACCUM_STEPS} (effective batch=$((PHYS_BATCH * ACCUM_STEPS)))"
 
 # Prefer persistent conda if installed in /workspace; fall back to ~/miniconda3.
 if [ -f /workspace/miniconda3/etc/profile.d/conda.sh ]; then
@@ -70,7 +93,8 @@ for SEED in "${SEEDS[@]}"; do
     --weights_folder "${RUN_DIR}/checkpoints" \
     --weights_file "${WEIGHTS_FILE}" \
     --lr "${LR}" \
-    --batch_size 8 \
+    --batch_size "${PHYS_BATCH}" \
+    --accumulate_grad_batches "${ACCUM_STEPS}" \
     --num_workers 16 \
     --seed "${SEED}" \
     --deterministic \
@@ -89,7 +113,8 @@ echo "Done (or already were). Check ${RUN_DIR}/checkpoints/*.done to confirm whi
 #   [ -f "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.done" ] && continue
 #   python train_GWHD_baseline_clean.py \
 #     --weights_folder "${RUN_DIR}/checkpoints" --weights_file "${WEIGHTS_FILE}" \
-#     --lr "${LR}" --batch_size 8 --num_workers 5 --seed "${SEED}" --deterministic \
+#     --lr "${LR}" --batch_size "${PHYS_BATCH}" --accumulate_grad_batches "${ACCUM_STEPS}" \
+#     --num_workers 5 --seed "${SEED}" --deterministic \
 #     > "${RUN_DIR}/logs/train_seed${SEED}.log" 2>&1 &
 # done
 # wait

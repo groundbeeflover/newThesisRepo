@@ -46,12 +46,19 @@
 #   lr defaults to 1e-5 (the setting with a known target number). Pass 1e-4
 #   to run the other row Mattia mentions exists in the sheet (Sheet3, rows
 #   3+5) -- no target number for that one has been shared yet.
+# If a task OOMs (L40s have 48GB, so unlikely, but PHYS_BATCH/ACCUM_STEPS are
+# here for parity with run_repro_dgkarthik.sh in case you move a seed there):
+# sbatch --export=ALL,PHYS_BATCH=4,ACCUM_STEPS=2 hpc/repro_dgkarthik.slurm
 set -euo pipefail
 
 LR="${1:-1e-5}"
 REG_WEIGHTS=(0.5 0.5 0.5 0.055 0.0001)
 SEEDS=(0 1 2)
 SEED="${SEEDS[$SLURM_ARRAY_TASK_ID]}"
+PHYS_BATCH="${PHYS_BATCH:-8}"
+ACCUM_STEPS="${ACCUM_STEPS:-1}"
+
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 RUN_NAME="gwhd_repro_dgkarthik_lr${LR}"
 RUN_DIR="runs/${RUN_NAME}"
@@ -84,6 +91,8 @@ srun python train_GWHD_dgfrcnn_mattia.py \
   --weights_file "${WEIGHTS_FILE}" \
   --reg_weights "${REG_WEIGHTS[@]}" \
   --lr "${LR}" \
+  --batch_size "${PHYS_BATCH}" \
+  --accumulate_grad_batches "${ACCUM_STEPS}" \
   --seed "${SEED}" \
   --deterministic \
   2>&1 | tee "${RUN_DIR}/logs/train_seed${SEED}.log"

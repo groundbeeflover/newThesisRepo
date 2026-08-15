@@ -32,16 +32,36 @@ set -euo pipefail
 #   lr defaults to 1e-5 (the setting with a known target number). Pass 1e-4
 #   to run the other row Mattia mentions exists in the sheet (Sheet3, rows
 #   3+5) -- no target number for that one has been shared yet.
+#
+# If you hit `torch.OutOfMemoryError` (this run is even more memory-hungry
+# than the baseline -- same BS=8 detector plus the DA heads on top -- so if
+# the baseline OOM'd on your GPU, expect this one to too): same two levers as
+# run_repro_baseline.sh, settable via env vars without editing this file:
+#
+#   PHYS_BATCH / ACCUM_STEPS -- split the effective BS=8 into smaller physical
+#   steps accumulated together. Keep PHYS_BATCH * ACCUM_STEPS = 8 to preserve
+#   the reproduction's effective batch size.
+#   Example: PHYS_BATCH=4 ACCUM_STEPS=2 bash run_repro_dgkarthik.sh
+#
+# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True below is a free fix for
+# fragmentation specifically (large "reserved but unallocated" in the OOM
+# message); use PHYS_BATCH/ACCUM_STEPS too if the physical batch itself is
+# just too big for the card.
 
 LR="${1:-1e-5}"
 ENV_NAME="DGOD"
 REG_WEIGHTS=(0.5 0.5 0.5 0.055 0.0001)
 SEEDS=(0 1 2)
+PHYS_BATCH="${PHYS_BATCH:-8}"
+ACCUM_STEPS="${ACCUM_STEPS:-1}"
+
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 RUN_NAME="gwhd_repro_dgkarthik_lr${LR}"
 RUN_DIR="runs/${RUN_NAME}"
 
 echo "Starting DGKarthik reproduction (lr=${LR}, reg_weights=${REG_WEIGHTS[*]}), seeds: ${SEEDS[*]}"
+echo "Physical batch=${PHYS_BATCH}, accumulate_grad_batches=${ACCUM_STEPS} (effective batch=$((PHYS_BATCH * ACCUM_STEPS)))"
 
 # Prefer persistent conda if installed in /workspace; fall back to ~/miniconda3.
 if [ -f /workspace/miniconda3/etc/profile.d/conda.sh ]; then
@@ -80,6 +100,8 @@ for SEED in "${SEEDS[@]}"; do
     --weights_file "${WEIGHTS_FILE}" \
     --reg_weights "${REG_WEIGHTS[@]}" \
     --lr "${LR}" \
+    --batch_size "${PHYS_BATCH}" \
+    --accumulate_grad_batches "${ACCUM_STEPS}" \
     --seed "${SEED}" \
     --deterministic \
     2>&1 | tee "${RUN_DIR}/logs/train_seed${SEED}.log"
@@ -98,7 +120,8 @@ echo "Done (or already were). Check ${RUN_DIR}/checkpoints/*.done to confirm whi
 #   [ -f "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.done" ] && continue
 #   python train_GWHD_dgfrcnn_mattia.py \
 #     --exp dg --weights_folder "${RUN_DIR}/checkpoints" --weights_file "${WEIGHTS_FILE}" \
-#     --reg_weights "${REG_WEIGHTS[@]}" --lr "${LR}" --seed "${SEED}" --deterministic \
+#     --reg_weights "${REG_WEIGHTS[@]}" --lr "${LR}" --batch_size "${PHYS_BATCH}" \
+#     --accumulate_grad_batches "${ACCUM_STEPS}" --seed "${SEED}" --deterministic \
 #     > "${RUN_DIR}/logs/train_seed${SEED}.log" 2>&1 &
 # done
 # wait
