@@ -27,6 +27,7 @@ from torchmetrics.detection import MeanAveragePrecision
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
+import pytorch_lightning
 from pytorch_lightning.core.module import LightningModule
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import Callback, ModelCheckpoint
@@ -39,11 +40,9 @@ from dg import (
     NaturalDomainBatchSampler,
 )
 
-SEED=42
-torch.manual_seed(SEED)
-np.random.seed(SEED)
-random.seed(SEED)
-seed_everything(SEED)
+# Overwritten by --seed in __main__ (before any seed-dependent object --
+# CORAL's fixed projection, the batch sampler, the model itself -- is built).
+SEED = 42
 
 class WheatDataset(Dataset):
     """A dataset example for GWC 2021 competition."""
@@ -568,7 +567,30 @@ def parser_args():
 
   parser.add_argument('--num_workers', default=16, type=int,
                       help='Number of dataloader workers.')
-  
+
+  parser.add_argument(
+      '--accumulate_grad_batches', dest='accumulate_grad_batches', default=1, type=int,
+      help='Lightning gradient accumulation steps. Use this to hit a target *effective* '
+      'batch size (--batch_size * this value) on a GPU too small to fit it in one physical '
+      'step -- e.g. --batch_size 4 --accumulate_grad_batches 2 for an effective BS=8 on a '
+      '24GB card. Default 1 = no accumulation, matches --batch_size exactly (unchanged '
+      'behavior). Note this is not bit-identical to a true single-step BS=8 forward pass: '
+      'any non-frozen BatchNorm layers in the backbone compute statistics per physical step, '
+      'not per effective batch, and (for --sampler domain_diverse) the number of distinct '
+      'domains guaranteed per physical batch also shrinks to --batch_size.',
+  )
+
+  parser.add_argument(
+      '--seed', dest='seed', default=42, type=int,
+      help='Seed value for removing randomicity.',
+  )
+
+  parser.add_argument(
+      '--deterministic', dest='deterministic', action='store_true',
+      help='Enable full determinism (cudnn deterministic algorithms, '
+      'Trainer(deterministic=True)). Default is nondeterministic/benchmark mode.',
+  )
+
   parser.add_argument('--eval_wada', action='store_true',
                       help='Run WADA/ADA-style evaluation on the test set instead of training.')
 
@@ -767,11 +789,37 @@ if __name__ == '__main__':
 
   args = parser_args()
   #take inputs from CLI arguments
-  
+
+  SEED = args.seed
+  print(f"SEED: {SEED}")
+
+  # Determinism block, verbatim from Mattia Dutto's email (2026-08-06,
+  # forwarded by Petra Bosilj 2026-08-12), same as train_GWHD_baseline_clean.py
+  # / train_GWHD_dgfrcnn_mattia.py: random/numpy/pytorch_lightning/torch
+  # seeding plus cudnn determinism switches, gated behind --deterministic.
+  # Runs before the dataset/batch_sampler/model are built so SEED is correct
+  # everywhere it's consumed (coral_batch_sampler's seed=, CORAL's fixed
+  # projection_seed=).
+  random.seed(SEED)
+  np.random.seed(SEED)
+  pytorch_lightning.seed_everything(SEED)
+  seed_everything(SEED)
+  torch.manual_seed(SEED)
+  torch.cuda.manual_seed(SEED)
+  torch.cuda.manual_seed_all(SEED)
+
+  if args.deterministic:
+      torch.backends.cudnn.benchmark = False
+      torch.backends.cudnn.deterministic = True
+      torch.use_deterministic_algorithms(True)
+  else:
+      torch.backends.cudnn.benchmark = True
+      torch.backends.cudnn.deterministic = False
+
   NET_FOLDER = args.weights_folder
   #take path to weights file
-  
-  weights_file = args.weights_file  
+
+  weights_file = args.weights_file
   #take weight file name
 
   # Dataloader design based on input arguments
@@ -980,8 +1028,16 @@ if __name__ == '__main__':
     detector.coral_diag_csv_path = os.path.join(NET_FOLDER, f"{weights_file}_coral_diag.csv")
 
   early_stop_callback= EarlyStopping(monitor='val_acc', min_delta=0.00, patience=10, verbose=False, mode='max')
-  checkpoint_callback = ModelCheckpoint(monitor='val_acc', dirpath=NET_FOLDER, filename=weights_file, mode='max')
-  
+  # save_last=True: writes NET_FOLDER/last.ckpt every epoch (in addition to the
+  # best-val_acc checkpoint under `weights_file`), same convention as
+  # train_GWHD_baseline_clean.py / train_GWHD_dgfrcnn_mattia.py. This is what
+  # lets an interrupted CORAL run (spot/interruptible RunPod instance
+  # reclaimed, walltime cap hit) resume cleanly instead of restarting.
+  checkpoint_callback = ModelCheckpoint(
+      monitor='val_acc', dirpath=NET_FOLDER, filename=weights_file, mode='max',
+      save_last=True,
+  )
+
   # trainer = Trainer(
   #    accelerator="cpu",
   #    devices=1,
@@ -995,11 +1051,28 @@ if __name__ == '__main__':
   trainer = Trainer(
       accelerator="auto",
       max_epochs=args.max_epochs,
-      deterministic=False,
+      deterministic=args.deterministic,
+      accumulate_grad_batches=args.accumulate_grad_batches,
       callbacks=[checkpoint_callback, early_stop_callback],
       num_sanity_val_steps=2
   )
-  trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=val_dataloader)
+
+  # Resume from the last checkpoint if this is a re-submission of a run that
+  # got cut off (walltime limit, spot reclaim). Restores full trainer state:
+  # weights, optimizer, LR scheduler, epoch count, early-stopping patience.
+  last_ckpt_path = os.path.join(NET_FOLDER, 'last.ckpt')
+  resume_from = last_ckpt_path if os.path.exists(last_ckpt_path) else None
+  if resume_from:
+      print(f"Resuming from checkpoint: {resume_from}")
+  else:
+      print("No existing checkpoint found, starting from scratch.")
+
+  trainer.fit(
+      detector,
+      train_dataloaders=train_dataloader,
+      val_dataloaders=val_dataloader,
+      ckpt_path=resume_from,
+  )
   
   
   # detector.pr_file = 'pr_'+weights_file 
