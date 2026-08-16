@@ -1037,6 +1037,15 @@ if __name__ == '__main__':
       monitor='val_acc', dirpath=NET_FOLDER, filename=weights_file, mode='max',
       save_last=True,
   )
+  # NOTE: dirpath (NET_FOLDER) is shared across all seeds of a repro run
+  # (run_repro_coral.sh / run_coral_top2_seed_confirm.sh pass the same
+  # --weights_folder for every seed, only --weights_file differs).
+  # save_last=True would otherwise write a single generic "last.ckpt" into
+  # that shared directory, so a later seed's auto-resume check below would
+  # find and resume from the *previous* seed's last checkpoint instead of
+  # starting fresh. Namespace the "last" checkpoint by weights_file to keep
+  # each seed's resume state isolated.
+  checkpoint_callback.CHECKPOINT_NAME_LAST = f"{weights_file}-last"
 
   # trainer = Trainer(
   #    accelerator="cpu",
@@ -1060,7 +1069,7 @@ if __name__ == '__main__':
   # Resume from the last checkpoint if this is a re-submission of a run that
   # got cut off (walltime limit, spot reclaim). Restores full trainer state:
   # weights, optimizer, LR scheduler, epoch count, early-stopping patience.
-  last_ckpt_path = os.path.join(NET_FOLDER, 'last.ckpt')
+  last_ckpt_path = os.path.join(NET_FOLDER, f"{weights_file}-last.ckpt")
   resume_from = last_ckpt_path if os.path.exists(last_ckpt_path) else None
   if resume_from:
       print(f"Resuming from checkpoint: {resume_from}")

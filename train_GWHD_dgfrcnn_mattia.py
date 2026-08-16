@@ -601,6 +601,60 @@ class DGFRCNN(LightningModule):
             )
 
 
+def evaluate_map(detector, dataloader, device):
+    """
+    Evaluate global mAP on one complete dataset split, independent of the
+    Lightning training/validation loop. Gives a full map/map_50/map_75
+    breakdown and is used by the --eval_map post-training path so results
+    can be written to a per-run CSV -- same convention (and same CSV
+    schema) as train_GWHD_coralfrcnn.py's --eval_map path, so results from
+    any of the three training scripts are combinable with
+    summarize_eval_results.py.
+    """
+    detector.eval()
+    detector.to(device)
+
+    metric = MeanAveragePrecision(
+        iou_type="bbox",
+        class_metrics=True,
+        iou_thresholds=[0.1, 0.5, 0.75],
+        extended_summary=True,
+    ).to(device)
+
+    for batch in tqdm(dataloader, desc="mAP evaluation"):
+        images = [image.to(device) for image in batch[0]]
+
+        targets = []
+        for boxes in batch[1]:
+            boxes = boxes.float().to(device)
+            targets.append({
+                "boxes": boxes,
+                "labels": torch.ones(len(boxes), dtype=torch.long, device=device),
+            })
+
+        with torch.no_grad():
+            predictions = detector(images)
+
+        metric.update(predictions, targets)
+
+    results = metric.compute()
+
+    print("\nEvaluation results")
+    print("==================")
+    print(f"mAP:     {results['map'].item():.6f}")
+    print(f"mAP@50:  {results['map_50'].item():.6f}")
+    print(f"mAP@75:  {results['map_75'].item():.6f}")
+
+    if results["map_per_class"].numel() > 0:
+        print(f"AP per class: {results['map_per_class'].detach().cpu().tolist()}")
+
+    return {
+        "map_mean_iou_10_50_75": float(results["map"].item()),
+        "map_50": float(results["map_50"].item()),
+        "map_75": float(results["map_75"].item()),
+    }
+
+
 def parser_args():
     parser = argparse.ArgumentParser(description="DGFRCNN Main Experiments")
     parser.add_argument(
@@ -672,6 +726,17 @@ def parser_args():
         action="store_true",
         help="Enable full determinism (cudnn deterministic algorithms, "
         "Trainer(deterministic=True)). Default is nondeterministic/benchmark mode.",
+    )
+    parser.add_argument(
+        "--eval_map", dest="eval_map", action="store_true",
+        help="Skip training entirely; load the checkpoint at "
+        "--weights_folder/--weights_file.ckpt and evaluate mAP (map/map_50/map_75) "
+        "on --eval_split, writing <weights_file>_<split>_map.csv into --weights_folder. "
+        "Matches train_GWHD_coralfrcnn.py's --eval_map convention.",
+    )
+    parser.add_argument(
+        "--eval_split", dest="eval_split", default="test", choices=["val", "test"],
+        help="Which split --eval_map evaluates. Default test (primary thesis metric).",
     )
 
     return parser.parse_args()
@@ -749,6 +814,38 @@ if __name__ == "__main__":
         2, BATCH_SIZE, args.exp, args.reg_weights, args
     )  # Num classes + 1 and batch_size
 
+    # --eval_map: separate, post-training invocation (see run_repro_dgkarthik.sh)
+    # that loads the checkpoint this seed already trained and writes a results
+    # CSV -- kept out of the training path so each seed gets its own train log
+    # (this process's stdout) and its own test log (the --eval_map process's
+    # stdout) instead of one merged log file.
+    if args.eval_map:
+        ckpt_path = os.path.join(NET_FOLDER, weights_file + ".ckpt")
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+
+        print(f"Loading checkpoint: {ckpt_path}")
+        checkpoint = torch.load(ckpt_path, map_location="cpu")
+        detector.load_state_dict(checkpoint["state_dict"])
+
+        if args.eval_split == "val":
+            eval_dataloader = val_dataloader
+            split_name = "validation"
+        else:
+            eval_dataloader = test_dataloader
+            split_name = "test"
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        print(f"\nEvaluating {split_name} split...")
+        results = evaluate_map(detector=detector, dataloader=eval_dataloader, device=device)
+
+        output_path = os.path.join(NET_FOLDER, f"{weights_file}_{args.eval_split}_map.csv")
+        pd.DataFrame([{"split": args.eval_split, **results}]).to_csv(output_path, index=False)
+        print(f"\nSaved results to {output_path}")
+
+        sys.exit(0)
+
     # if os.path.exists(NET_FOLDER+'/'+weights_file+'.ckpt'):
     #   detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])
     # else:
@@ -769,6 +866,15 @@ if __name__ == "__main__":
         monitor="val_acc", dirpath=NET_FOLDER, filename=weights_file, mode="max",
         save_last=True,
     )
+    # NOTE: dirpath (NET_FOLDER) is shared across all seeds of a repro run
+    # (run_repro_dgkarthik.sh passes the same --weights_folder for every
+    # seed, only --weights_file differs). save_last=True would otherwise
+    # write a single generic "last.ckpt" into that shared directory, so a
+    # later seed's auto-resume check below would find and resume from the
+    # *previous* seed's last checkpoint instead of starting fresh. Namespace
+    # the "last" checkpoint by weights_file to keep each seed's resume state
+    # isolated.
+    checkpoint_callback.CHECKPOINT_NAME_LAST = f"{weights_file}-last"
 
     trainer = Trainer(
         accelerator="gpu",
@@ -787,7 +893,7 @@ if __name__ == "__main__":
     # it isn't (self.mode is a plain int, not a registered buffer), so a resumed run
     # restarts its mode-cycle at 0 rather than wherever it left off. That's a minor
     # inefficiency (repeats up to 3 extra sub-steps), not a correctness problem.
-    last_ckpt_path = os.path.join(NET_FOLDER, "last.ckpt")
+    last_ckpt_path = os.path.join(NET_FOLDER, f"{weights_file}-last.ckpt")
     resume_from = last_ckpt_path if os.path.exists(last_ckpt_path) else None
     if resume_from:
         print(f"Resuming from checkpoint: {resume_from}")
@@ -801,37 +907,12 @@ if __name__ == "__main__":
         ckpt_path=resume_from,
     )
 
-    detector.pr_file = "pr_" + weights_file
-    ckpt_path = os.path.join(NET_FOLDER, weights_file + ".ckpt")
-    detector.load_state_dict(
-        torch.load(ckpt_path)["state_dict"]
-    )
-    trainer = Trainer(accelerator="gpu", max_epochs=0, num_sanity_val_steps=-1)
-    # trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=test_dataloader)
-    # NOTE: previously hardcoded to "GWHD/{args.model_checkpoint}.ckpt", which only worked when
-    # --weights_folder was left at its "GWHD" default and --model-checkpoint was passed in
-    # separately (redundant with --weights_file). Fixed to always resolve from the actual
-    # --weights_folder/--weights_file this run used, so parallel runs into distinct run dirs
-    # (as SLURM launches them) evaluate the checkpoint they just trained, not a stale/missing one.
-    print(f"VALIDATION:")
-    trainer.validate(
-        detector,
-        dataloaders=val_dataloader,
-        ckpt_path=ckpt_path,
-    )
-    print(f"TEST:")
-    trainer.validate(
-        detector,
-        dataloaders=test_dataloader,
-        ckpt_path=ckpt_path,
-    )
-    # trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=train_dataloader)
-
-    # Sentinel file so the SLURM wrapper can tell "training+eval genuinely finished"
-    # apart from "best checkpoint exists but the run was cut off mid-training and
-    # needs resubmitting to resume".
-    with open(os.path.join(NET_FOLDER, weights_file + ".done"), "w") as f:
-        f.write("done\n")
+    # Training ends here -- no inline post-fit validate/test. Run this same
+    # script again with --eval_map (see run_repro_dgkarthik.sh) to evaluate the
+    # checkpoint just written and get a results CSV; that gives each seed its
+    # own test log and CSV, separate from this training log. The .done
+    # sentinel is written by the shell wrapper once both steps succeed, not
+    # here, since "done" now means train+eval both completed.
 
     #  val_acc            0.5711795687675476 with batch size 4 - baseline-v11 - 38 epochs.
     #  val_acc             0.622123122215271 with batch size 8 - baseline-v12 - 25 epochs.

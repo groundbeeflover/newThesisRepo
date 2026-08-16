@@ -91,10 +91,11 @@ for SEED in "${SEEDS[@]}"; do
     continue
   fi
 
-  echo "=== coral seed ${SEED} ==="
+  echo "=== coral seed ${SEED}: training ==="
   # NOTE: train_GWHD_coralfrcnn.py checkpoints every epoch and auto-resumes
-  # from last.ckpt if this seed was interrupted (e.g. a spot/interruptible pod
-  # got reclaimed) -- rerunning this script is always safe.
+  # from <weights_file>-last.ckpt if this seed was interrupted (e.g. a
+  # spot/interruptible pod got reclaimed) -- rerunning this script is always
+  # safe. Training-only: writes its own log and its own checkpoint.
   python train_GWHD_coralfrcnn.py \
     --exp coral \
     --weights_folder "${RUN_DIR}/checkpoints" \
@@ -109,6 +110,22 @@ for SEED in "${SEEDS[@]}"; do
     --deterministic \
     2>&1 | tee "${RUN_DIR}/logs/train_seed${SEED}.log"
 
+  echo "=== coral seed ${SEED}: test evaluation ==="
+  # Separate invocation, separate log: loads the checkpoint just trained and
+  # writes ${WEIGHTS_FILE}_test_map.csv (map/map_50/map_75) into checkpoints/.
+  # (train_GWHD_coralfrcnn.py already had --eval_map support; this script
+  # just wasn't calling it before, so no test log or results CSV was ever
+  # produced for CORAL repro runs.)
+  python train_GWHD_coralfrcnn.py \
+    --exp coral \
+    --weights_folder "${RUN_DIR}/checkpoints" \
+    --weights_file "${WEIGHTS_FILE}" \
+    --eval_map \
+    --eval_split test \
+    2>&1 | tee "${RUN_DIR}/logs/test_seed${SEED}.log"
+
+  # Only mark this seed done once both training and eval have succeeded
+  # (set -euo pipefail above means either failing exits the script first).
   # train_GWHD_coralfrcnn.py doesn't write a WEIGHTS_FILE.done sentinel itself
   # (unlike train_GWHD_baseline_clean.py / train_GWHD_dgfrcnn_mattia.py) --
   # write one here so the skip-if-done check above works the same way.
@@ -116,6 +133,7 @@ for SEED in "${SEEDS[@]}"; do
 done
 
 echo "Done (or already were). Check ${RUN_DIR}/checkpoints/*.done to confirm which seeds finished."
+echo "Per-seed results: ${RUN_DIR}/checkpoints/coral_seed*_test_map.csv"
 
 # --- Optional: run all 3 seeds in parallel instead of sequentially --------
 # Only do this if you've confirmed your GPU has enough free VRAM for 3x the
