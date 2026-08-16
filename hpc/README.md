@@ -223,6 +223,27 @@ convention, not a Mattia-confirmed value the way `alpha_4=0.055` is for DGKarthi
 against — these exist so all three deterministic BS=8 runs are directly comparable to each other, not to
 reproduce a specific published number.
 
+**Getting logs/checkpoints/test-results/summary out of `hpc/repro_coral.slurm`:** each seed runs `srun python
+train_GWHD_coralfrcnn.py ...` twice in sequence — a training call (writes `logs/train_seed<N>.log` and the
+checkpoints), then a separate `--eval_map --eval_split test` call (writes `logs/test_seed<N>.log` and
+`checkpoints/coral_seed<N>_test_map.csv`) — mirroring `run_repro_coral.sh`'s two-phase pattern. (An earlier
+version of this script only had the training call; fixed Aug 2026, since without the second call no test log or
+CSV was ever produced.) That gives you a *per-seed* CSV each; there's no automatic combined summary across the
+3 seeds. `summarize_coral_top2_seed_confirm.py` in the repo root is generic enough to do that aggregation
+despite the name (it just needs `<tag>_seed<N>_<split>_map.csv` files, which is exactly this naming):
+
+```bash
+python summarize_coral_top2_seed_confirm.py \
+  --results_dir runs/gwhd_repro_coral_lr1e-5/checkpoints \
+  --tags coral \
+  --seeds 0 1 2 \
+  --out_csv runs/gwhd_repro_coral_lr1e-5/summary.csv
+```
+
+Prints per-seed and mean/std-across-seeds tables and writes `summary.csv` (+ `summary_per_seed.csv`). Only
+`test` CSVs get produced by the current `--eval_map` calls (not `val`), so the summary's `val_map_50` columns
+will be empty — add a second `--eval_map --eval_split val` call per seed (same pattern) if you want that too.
+
 Mattia's email also mentions LR=1e-4 was tested (Sheet3 rows 3+5) but doesn't give numbers for it. Both scripts
 take `lr` as an optional first argument if you want to run that comparison too:
 
