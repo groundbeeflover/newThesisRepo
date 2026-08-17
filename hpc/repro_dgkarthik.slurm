@@ -96,3 +96,20 @@ srun python train_GWHD_dgfrcnn_mattia.py \
   --seed "${SEED}" \
   --deterministic \
   2>&1 | tee "${RUN_DIR}/logs/train_seed${SEED}.log"
+
+echo "=== dgkarthik seed ${SEED}: test evaluation ==="
+# Separate invocation, separate log: loads the checkpoint just trained and
+# writes ${WEIGHTS_FILE}_test_map.csv (map/map_50/map_75) into checkpoints/.
+# Mirrors run_repro_dgkarthik.sh's two-phase pattern -- without this second
+# call, no test log or results CSV is ever produced for this seed.
+srun python train_GWHD_dgfrcnn_mattia.py \
+  --exp dg \
+  --weights_folder "${RUN_DIR}/checkpoints" \
+  --weights_file "${WEIGHTS_FILE}" \
+  --eval_map \
+  --eval_split test \
+  2>&1 | tee "${RUN_DIR}/logs/test_seed${SEED}.log"
+
+# Only mark this seed done once both training and eval have succeeded
+# (set -euo pipefail above means either failing exits the script first).
+touch "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.done"
