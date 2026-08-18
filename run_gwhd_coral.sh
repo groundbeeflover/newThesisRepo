@@ -1,49 +1,67 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Generalized CORAL training run for the bs2-vs-bs8 sampling-bottleneck
-# ablation (see run_coral_sampler_ablation.sh for the full grid this feeds).
+# RunPod: nondeterministic CORAL runs for the two sampler configs of
+# interest -- domcap2_bs8 (domain_capped, K=2) and diverse_bs8
+# (domain_diverse). Same conda-detection convention as
+# run_gwhd_baseline.sh / run_gwhd_dg.sh.
 #
-# Usage:
-#   ./run_gwhd_coral.sh <tag> <sampler> <batch_size> <domains_per_batch> [lr] [wada]
+# NOTE: this replaces the old generic
+# `run_gwhd_coral.sh <tag> <sampler> <batch_size> <domains_per_batch> [lr] [wada]`
+# interface (used by run_coral_sampler_ablation.sh for its full 5-point
+# bs2/bs8 grid). That grid is not reproduced here -- only the two bs8 configs
+# below. If the ablation script's other points (capped2_bs2, natural_bs8,
+# etc.) are still needed, they'll need their own runner.
 #
-#   sampler:            domain_diverse | domain_capped | natural
-#   domains_per_batch:  only affects behaviour when sampler=domain_capped
-#                        (pass anything, e.g. 2, for domain_diverse/natural)
+# Ablation-style: each sampler config is run under two separate (LR,
+# reg_weights) presets, each its own run directory, each run for 3
+# nondeterministic rounds:
+#   lr1e-4_reg075  -- LR=1e-4, reg_weights 0.5 0.5 0.5 0.075 0.0001
+#   lr1e-5_reg055  -- LR=1e-5, reg_weights 0.5 0.5 0.5 0.055 0.0001
+#                     (matches run_repro_coral.sh's alignment with the
+#                     baseline/dgkarthik deterministic repros)
+# Only alpha_4 (the 4th reg weight) differs between presets; a/b/c/e keep
+# this repo's existing 0.5/0.5/0.5/0.0001 convention in both.
 #
-# Examples (the 5-point grid from run_coral_sampler_ablation.sh):
-#   ./run_gwhd_coral.sh capped2_bs2  domain_capped  2 2 1e-4   # control: K=2, samples/domain=1
-#   ./run_gwhd_coral.sh capped2_bs8  domain_capped  8 2 1e-4   # the comparison you asked for: K=2, samples/domain=4
-#   ./run_gwhd_coral.sh diverse_bs8  domain_diverse 8 8 1e-4   # isolates K: K=8, samples/domain=1
-#   ./run_gwhd_coral.sh capped4_bs8  domain_capped  8 4 1e-4   # midpoint: K=4, samples/domain=2
-#   ./run_gwhd_coral.sh natural_bs8  natural         8 2 1e-4  # reference: no domain balancing
+# 2 configs x 2 presets = 4 run directories, 3 rounds each = 12 full
+# train+eval passes total.
 #
-# Each run writes to runs/gwhd_coral_ablation_<tag>/ (checkpoints, logs,
-# config snapshot, domain-histogram + coral-diag CSVs from the
-# on_train_epoch_end instrumentation in train_GWHD_coralfrcnn.py), then also
-# copies its val/test mAP + those two diagnostic CSVs, flattened, into
-# coral_ablation_runs/ for summarize_coral_ablation.py to pick up.
+# Each round is nondeterministic (cudnn.benchmark on, no --deterministic --
+# the training script defaults to this when --deterministic is omitted).
+# Nondeterministic mode doesn't need the PHYS_BATCH/ACCUM_STEPS split that
+# the deterministic repro (run_repro_coral.sh) needs to fit BS=8 in memory,
+# so batch_size=8 is passed straight through as a single physical batch.
 #
-# Safe to re-run: skips training (but not eval) if the checkpoint already
-# exists, matching the other run_gwhd_*.sh scripts' convention.
-
-TAG="${1:?Usage: run_gwhd_coral.sh <tag> <sampler> <batch_size> <domains_per_batch> [lr] [wada]}"
-SAMPLER="${2:?sampler required: domain_diverse|domain_capped|natural}"
-BATCH_SIZE="${3:?batch_size required}"
-DOMAINS_PER_BATCH="${4:?domains_per_batch required (ignored unless sampler=domain_capped)}"
-LR="${5:-0.0001}"
-RUN_WADA="${6:-no_wada}"
+# Each round still gets a distinct --seed (0/1/2) so weight init, data
+# order, and the domain-diverse/domain-capped sampler draw all vary too, not
+# just conv-algorithm selection -- gives 3 genuinely independent trials per
+# (config, preset).
+#
+# Configs x presets x rounds run SEQUENTIALLY (single RunPod GPU). Not
+# detached: run inside tmux/screen so it survives an SSH disconnect:
+#   tmux new -s gwhd_coral
+#   bash run_gwhd_coral.sh
+#   # Ctrl-b d to detach; `tmux attach -t gwhd_coral` to reattach later
+#
+# Safe to re-run / resume: each (config, preset, round) triple is skipped if
+# its .done sentinel already exists.
 
 ENV_NAME="DGOD"
-RUN_NAME="gwhd_coral_ablation_${TAG}"
-WEIGHTS_FILE="coral_ablation_${TAG}"
-RUN_DIR="runs/${RUN_NAME}"
-CKPT_DIR="${RUN_DIR}/checkpoints"
-RESULTS_DIR="coral_ablation_runs"
+ROUNDS=(0 1 2)
 
-echo "Starting CORAL sampling-ablation run..."
-echo "Tag=${TAG} sampler=${SAMPLER} batch_size=${BATCH_SIZE} domains_per_batch=${DOMAINS_PER_BATCH} lr=${LR}"
-echo "Run directory: ${RUN_DIR}"
+# tag:sampler:domains_per_batch
+CONFIGS=(
+  "domcap2_bs8:domain_capped:2"
+  "diverse_bs8:domain_diverse:8"
+)
+
+# tag:lr:alpha4  (reg_weights = 0.5 0.5 0.5 <alpha4> 0.0001)
+HP_PRESETS=(
+  "lr1e-4_reg075:1e-4:0.075"
+  "lr1e-5_reg055:1e-5:0.055"
+)
+
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Prefer persistent conda if installed in /workspace; fall back to ~/miniconda3.
 if [ -f /workspace/miniconda3/etc/profile.d/conda.sh ]; then
@@ -51,90 +69,73 @@ if [ -f /workspace/miniconda3/etc/profile.d/conda.sh ]; then
 else
   source ~/miniconda3/etc/profile.d/conda.sh
 fi
-
 conda activate "${ENV_NAME}"
 
-mkdir -p "${CKPT_DIR}" "${RUN_DIR}/logs" "${RUN_DIR}/config_snapshot" "${RESULTS_DIR}"
+for CONFIG in "${CONFIGS[@]}"; do
+  IFS=':' read -r CONFIG_TAG SAMPLER DOMAINS_PER_BATCH <<< "${CONFIG}"
 
-cp train_GWHD_coralfrcnn.py "${RUN_DIR}/config_snapshot/"
-cp -r dg "${RUN_DIR}/config_snapshot/" 2>/dev/null || true
-cp requirements.txt "${RUN_DIR}/config_snapshot/" 2>/dev/null || true
+  for PRESET in "${HP_PRESETS[@]}"; do
+    IFS=':' read -r HP_TAG LR ALPHA4 <<< "${PRESET}"
+    REG_WEIGHTS=(0.5 0.5 0.5 "${ALPHA4}" 0.0001)
 
-pip freeze > "${RUN_DIR}/config_snapshot/pip_freeze.txt"
-conda list > "${RUN_DIR}/config_snapshot/conda_list.txt"
-nvidia-smi > "${RUN_DIR}/config_snapshot/nvidia_smi.txt"
-git rev-parse HEAD > "${RUN_DIR}/config_snapshot/git_commit.txt" 2>/dev/null || true
+    TAG="${CONFIG_TAG}_${HP_TAG}"
+    RUN_NAME="gwhd_coral_nondet_${TAG}"
+    RUN_DIR="runs/${RUN_NAME}"
+    CKPT_DIR="${RUN_DIR}/checkpoints"
 
-cat > "${RUN_DIR}/config_snapshot/run_command.txt" <<EOF
-python train_GWHD_coralfrcnn.py \\
-  --exp coral \\
-  --weights_folder "${CKPT_DIR}" \\
-  --weights_file "${WEIGHTS_FILE}" \\
-  --sampler ${SAMPLER} \\
-  --batch_size ${BATCH_SIZE} \\
-  --domains_per_batch ${DOMAINS_PER_BATCH} \\
-  --lr ${LR} \\
-  --reg_weights 0.5 0.5 0.5 0.075 0.0001
-EOF
+    echo "Starting nondeterministic CORAL run: config=${CONFIG_TAG} (sampler=${SAMPLER} domains_per_batch=${DOMAINS_PER_BATCH}) preset=${HP_TAG} (lr=${LR} reg_weights=${REG_WEIGHTS[*]}), rounds: ${ROUNDS[*]}"
+    echo "Batch size=8, single physical batch (no accumulation), nondeterministic (cudnn.benchmark)"
 
-# Record the config axes explicitly, since they're the whole point of this
-# grid -- summarize_coral_ablation.py reads this instead of re-parsing tags.
-cat > "${RESULTS_DIR}/${TAG}_config.json" <<EOF
-{
-  "tag": "${TAG}",
-  "sampler": "${SAMPLER}",
-  "batch_size": ${BATCH_SIZE},
-  "domains_per_batch": ${DOMAINS_PER_BATCH},
-  "lr": ${LR}
-}
-EOF
+    mkdir -p "${CKPT_DIR}" "${RUN_DIR}/logs" "${RUN_DIR}/config_snapshot"
 
-if [ -f "${CKPT_DIR}/${WEIGHTS_FILE}.ckpt" ]; then
-  echo "Checkpoint already exists: ${CKPT_DIR}/${WEIGHTS_FILE}.ckpt -- skipping training, running eval only."
-else
-  python train_GWHD_coralfrcnn.py \
-    --exp coral \
-    --weights_folder "${CKPT_DIR}" \
-    --weights_file "${WEIGHTS_FILE}" \
-    --sampler "${SAMPLER}" \
-    --batch_size "${BATCH_SIZE}" \
-    --domains_per_batch "${DOMAINS_PER_BATCH}" \
-    --lr "${LR}" \
-    --reg_weights 0.5 0.5 0.5 0.075 0.0001 \
-    2>&1 | tee "${RUN_DIR}/logs/train.log"
-fi
+    cp train_GWHD_coralfrcnn.py "${RUN_DIR}/config_snapshot/" 2>/dev/null || true
+    cp -r dg "${RUN_DIR}/config_snapshot/" 2>/dev/null || true
+    cp requirements.txt "${RUN_DIR}/config_snapshot/" 2>/dev/null || true
+    pip freeze > "${RUN_DIR}/config_snapshot/pip_freeze.txt"
+    conda list > "${RUN_DIR}/config_snapshot/conda_list.txt"
+    nvidia-smi > "${RUN_DIR}/config_snapshot/nvidia_smi.txt" || true
+    git rev-parse HEAD > "${RUN_DIR}/config_snapshot/git_commit.txt" 2>/dev/null || true
 
-echo "== Evaluating val + test =="
-for split in val test; do
-  python train_GWHD_coralfrcnn.py \
-    --exp coral \
-    --eval_map \
-    --eval_split "${split}" \
-    --weights_folder "${CKPT_DIR}" \
-    --weights_file "${WEIGHTS_FILE}" \
-    2>&1 | tee "${RUN_DIR}/logs/${split}_eval.log"
+    for ROUND in "${ROUNDS[@]}"; do
+      WEIGHTS_FILE="coral_nondet_${TAG}_round${ROUND}"
+
+      if [ -f "${CKPT_DIR}/${WEIGHTS_FILE}.done" ]; then
+        echo "Config ${CONFIG_TAG} preset ${HP_TAG} round ${ROUND} already completed (found ${WEIGHTS_FILE}.done). Skipping."
+        continue
+      fi
+
+      echo "=== coral ${TAG} round ${ROUND}: training ==="
+      # Own checkpoint + own training log per (config, preset, round).
+      python train_GWHD_coralfrcnn.py \
+        --exp coral \
+        --weights_folder "${CKPT_DIR}" \
+        --weights_file "${WEIGHTS_FILE}" \
+        --sampler "${SAMPLER}" \
+        --domains_per_batch "${DOMAINS_PER_BATCH}" \
+        --reg_weights "${REG_WEIGHTS[@]}" \
+        --lr "${LR}" \
+        --batch_size 8 \
+        --accumulate_grad_batches 1 \
+        --num_workers 16 \
+        --seed "${ROUND}" \
+        2>&1 | tee "${RUN_DIR}/logs/train_round${ROUND}.log"
+
+      echo "=== coral ${TAG} round ${ROUND}: test evaluation ==="
+      # Own test log + own test-results csv per (config, preset, round)
+      # (${WEIGHTS_FILE}_test_map.csv, written into checkpoints/).
+      python train_GWHD_coralfrcnn.py \
+        --exp coral \
+        --weights_folder "${CKPT_DIR}" \
+        --weights_file "${WEIGHTS_FILE}" \
+        --eval_map \
+        --eval_split test \
+        2>&1 | tee "${RUN_DIR}/logs/test_round${ROUND}.log"
+
+      touch "${CKPT_DIR}/${WEIGHTS_FILE}.done"
+    done
+
+    echo "Done (or already were) with ${TAG}. Check ${CKPT_DIR}/*.done to confirm which rounds finished."
+    echo "Per-round results: ${CKPT_DIR}/coral_nondet_${TAG}_round*_test_map.csv"
+    echo "Per-round per-domain results: ${CKPT_DIR}/coral_nondet_${TAG}_round*_per_domain_map.csv"
+  done
 done
-
-echo "== Flattening results into ${RESULTS_DIR}/ =="
-cp "${CKPT_DIR}/${WEIGHTS_FILE}_val_map.csv" "${RESULTS_DIR}/${TAG}_val_map.csv" 2>/dev/null || echo "!! missing val_map.csv"
-cp "${CKPT_DIR}/${WEIGHTS_FILE}_test_map.csv" "${RESULTS_DIR}/${TAG}_test_map.csv" 2>/dev/null || echo "!! missing test_map.csv"
-cp "${CKPT_DIR}/${WEIGHTS_FILE}_domain_histogram.csv" "${RESULTS_DIR}/${TAG}_domain_histogram.csv" 2>/dev/null || echo "!! missing domain_histogram.csv"
-cp "${CKPT_DIR}/${WEIGHTS_FILE}_coral_diag.csv" "${RESULTS_DIR}/${TAG}_coral_diag.csv" 2>/dev/null || echo "!! missing coral_diag.csv"
-
-if [ "${RUN_WADA}" = "wada" ] || [ "${RUN_WADA}" = "--wada" ] || [ "${RUN_WADA}" = "true" ]; then
-  echo "Starting WADA test evaluation..."
-  python train_GWHD_coralfrcnn.py \
-    --exp coral \
-    --weights_folder "${CKPT_DIR}" \
-    --weights_file "${WEIGHTS_FILE}" \
-    --eval_wada \
-    --eval_split test \
-    --score_threshold 0.5 \
-    --iou_threshold 0.5 \
-    --wada_output_dir "${RUN_DIR}/wada_test" \
-    2>&1 | tee "${RUN_DIR}/logs/wada_test.log"
-
-  cp "${RUN_DIR}/wada_test/wada_summary.csv" "${RESULTS_DIR}/${TAG}_wada_summary.csv" 2>/dev/null || true
-fi
-
-echo "Done: ${TAG}"

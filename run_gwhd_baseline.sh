@@ -1,18 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-EXP_NUM="${1:-run01}"
-RUN_WADA="${2:-no_wada}"
+# RunPod: nondeterministic reproduction of Mattia's "pure" baseline --
+# train_GWHD_baseline_clean.py, stock torchvision Faster R-CNN (no DA heads,
+# no fasterrcnn.py wrapper, hence no --reg_weights -- there's no DA loss to
+# weight). Same conda-detection convention as run_gwhd_dg.sh /
+# run_gwhd_coral.sh.
+#
+# Ablation-style: two separate LR presets, each its own run directory, each
+# run for 3 nondeterministic rounds:
+#   lr1e-4  -- LR=1e-4
+#   lr1e-5  -- LR=1e-5 (Mattia's setting, target avg test mAP@0.5 ~= 54.7)
+#
+# Each round is nondeterministic (cudnn.benchmark on, no --deterministic --
+# the training script defaults to this when --deterministic is omitted).
+# Nondeterministic mode doesn't need the PHYS_BATCH/ACCUM_STEPS split that
+# the deterministic repro (run_repro_baseline.sh) needs to fit BS=8 in
+# memory, since cudnn.benchmark picks the fastest-fitting conv algorithms
+# instead of forcing the slower/memory-hungrier deterministic ones -- so
+# batch_size=8 is passed straight through as a single physical batch.
+#
+# Each round still gets a distinct --seed (0/1/2) so weight init and data
+# order vary too, not just conv-algorithm selection -- gives 3 genuinely
+# independent trials per preset.
+#
+# Presets x rounds run SEQUENTIALLY (single RunPod GPU) -- 6 full
+# train+eval passes total. Not detached: run inside tmux/screen so it
+# survives an SSH disconnect:
+#   tmux new -s gwhd_baseline
+#   bash run_gwhd_baseline.sh
+#   # Ctrl-b d to detach; `tmux attach -t gwhd_baseline` to reattach later
+#
+# Safe to re-run / resume: each (preset, round) pair is skipped if its
+# .done sentinel already exists.
 
 ENV_NAME="DGOD"
-RUN_NAME="gwhd_fasterrcnn_baseline_${EXP_NUM}"
-WEIGHTS_FILE="fasterrcnn_baseline_${EXP_NUM}"
-RUN_DIR="runs/${RUN_NAME}"
+ROUNDS=(0 1 2)
 
-echo "Starting Faster R-CNN baseline run..."
-echo "Experiment: ${EXP_NUM}"
-echo "Run directory: ${RUN_DIR}"
-echo "Run WADA after training: ${RUN_WADA}"
+# tag:lr
+HP_PRESETS=(
+  "lr1e-4:1e-4"
+  "lr1e-5:1e-5"
+)
+
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Prefer persistent conda if installed in /workspace; fall back to ~/miniconda3.
 if [ -f /workspace/miniconda3/etc/profile.d/conda.sh ]; then
@@ -20,73 +51,60 @@ if [ -f /workspace/miniconda3/etc/profile.d/conda.sh ]; then
 else
   source ~/miniconda3/etc/profile.d/conda.sh
 fi
-
 conda activate "${ENV_NAME}"
 
-mkdir -p "${RUN_DIR}/checkpoints" "${RUN_DIR}/logs" "${RUN_DIR}/config_snapshot"
+for PRESET in "${HP_PRESETS[@]}"; do
+  IFS=':' read -r TAG LR <<< "${PRESET}"
 
-cp train_GWHD_dgfrcnn.py "${RUN_DIR}/config_snapshot/"
-cp fasterrcnn.py "${RUN_DIR}/config_snapshot/" 2>/dev/null || true
-cp requirements.txt "${RUN_DIR}/config_snapshot/" 2>/dev/null || true
+  RUN_NAME="gwhd_baseline_nondet_${TAG}"
+  RUN_DIR="runs/${RUN_NAME}"
 
-pip freeze > "${RUN_DIR}/config_snapshot/pip_freeze.txt"
-conda list > "${RUN_DIR}/config_snapshot/conda_list.txt"
-nvidia-smi > "${RUN_DIR}/config_snapshot/nvidia_smi.txt"
-git rev-parse HEAD > "${RUN_DIR}/config_snapshot/git_commit.txt" 2>/dev/null || true
+  echo "Starting nondeterministic pure-baseline reproduction: preset=${TAG} lr=${LR}, rounds: ${ROUNDS[*]}"
+  echo "Batch size=8, single physical batch (no accumulation), nondeterministic (cudnn.benchmark)"
 
-cat > "${RUN_DIR}/config_snapshot/run_command.txt" <<EOF
-python train_GWHD_dgfrcnn.py \\
-  --exp non_dg \\
-  --weights_folder "${RUN_DIR}/checkpoints" \\
-  --weights_file "${WEIGHTS_FILE}" \\
-  --reg_weights 0.5 0.5 0.5 0.075 0.0001
-EOF
+  mkdir -p "${RUN_DIR}/checkpoints" "${RUN_DIR}/logs" "${RUN_DIR}/config_snapshot"
 
-if [ -f "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.ckpt" ]; then
-  echo "ERROR: Checkpoint already exists:"
-  echo "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.ckpt"
-  echo "Use a different experiment number or delete the checkpoint."
-  exit 1
-fi
+  cp train_GWHD_baseline_clean.py "${RUN_DIR}/config_snapshot/" 2>/dev/null || true
+  cp requirements.txt "${RUN_DIR}/config_snapshot/" 2>/dev/null || true
+  pip freeze > "${RUN_DIR}/config_snapshot/pip_freeze.txt"
+  conda list > "${RUN_DIR}/config_snapshot/conda_list.txt"
+  nvidia-smi > "${RUN_DIR}/config_snapshot/nvidia_smi.txt" || true
+  git rev-parse HEAD > "${RUN_DIR}/config_snapshot/git_commit.txt" 2>/dev/null || true
 
-python train_GWHD_dgfrcnn.py \
-  --exp non_dg \
-  --weights_folder "${RUN_DIR}/checkpoints" \
-  --weights_file "${WEIGHTS_FILE}" \
-  --reg_weights 0.5 0.5 0.5 0.075 0.0001 \
-  2>&1 | tee "${RUN_DIR}/logs/train.log"
+  for ROUND in "${ROUNDS[@]}"; do
+    WEIGHTS_FILE="baseline_nondet_${TAG}_round${ROUND}"
 
-if [ "${RUN_WADA}" = "wada" ] || [ "${RUN_WADA}" = "--wada" ] || [ "${RUN_WADA}" = "true" ]; then
-  echo "Starting WADA test evaluation for Faster R-CNN baseline run..."
+    if [ -f "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.done" ]; then
+      echo "Preset ${TAG} round ${ROUND} already completed (found ${WEIGHTS_FILE}.done). Skipping."
+      continue
+    fi
 
-  cat > "${RUN_DIR}/config_snapshot/wada_command.txt" <<EOF
-python train_GWHD_dgfrcnn.py \\
-  --exp non_dg \\
-  --weights_folder "${RUN_DIR}/checkpoints" \\
-  --weights_file "${WEIGHTS_FILE}" \\
-  --reg_weights 0.5 0.5 0.5 0.075 0.0001 \\
-  --eval_wada \\
-  --eval_split test \\
-  --score_threshold 0.5 \\
-  --iou_threshold 0.5 \\
-  --wada_output_dir "${RUN_DIR}/wada_test"
-EOF
+    echo "=== pure baseline ${TAG} round ${ROUND}: training ==="
+    # Own checkpoint + own training log per (preset, round).
+    python train_GWHD_baseline_clean.py \
+      --weights_folder "${RUN_DIR}/checkpoints" \
+      --weights_file "${WEIGHTS_FILE}" \
+      --lr "${LR}" \
+      --batch_size 8 \
+      --accumulate_grad_batches 1 \
+      --num_workers 16 \
+      --seed "${ROUND}" \
+      2>&1 | tee "${RUN_DIR}/logs/train_round${ROUND}.log"
 
-  python train_GWHD_dgfrcnn.py \
-    --exp non_dg \
-    --weights_folder "${RUN_DIR}/checkpoints" \
-    --weights_file "${WEIGHTS_FILE}" \
-    --reg_weights 0.5 0.5 0.5 0.075 0.0001 \
-    --eval_wada \
-    --eval_split test \
-    --score_threshold 0.5 \
-    --iou_threshold 0.5 \
-    --wada_output_dir "${RUN_DIR}/wada_test" \
-    2>&1 | tee "${RUN_DIR}/logs/wada_test.log"
+    echo "=== pure baseline ${TAG} round ${ROUND}: test evaluation ==="
+    # Own test log + own test-results csv per (preset, round)
+    # (${WEIGHTS_FILE}_test_map.csv, written into checkpoints/).
+    python train_GWHD_baseline_clean.py \
+      --weights_folder "${RUN_DIR}/checkpoints" \
+      --weights_file "${WEIGHTS_FILE}" \
+      --eval_map \
+      --eval_split test \
+      2>&1 | tee "${RUN_DIR}/logs/test_round${ROUND}.log"
 
-  echo "WADA summary:"
-  cat "${RUN_DIR}/wada_test/wada_summary.csv"
-else
-  echo "Skipping WADA evaluation. To run it automatically, use:"
-  echo "./run_gwhd_baseline.sh ${EXP_NUM} wada"
-fi
+    touch "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.done"
+  done
+
+  echo "Done (or already were) with preset ${TAG}. Check ${RUN_DIR}/checkpoints/*.done to confirm which rounds finished."
+  echo "Per-round results: ${RUN_DIR}/checkpoints/baseline_nondet_${TAG}_round*_test_map.csv"
+  echo "Per-round per-domain results: ${RUN_DIR}/checkpoints/baseline_nondet_${TAG}_round*_per_domain_map.csv"
+done

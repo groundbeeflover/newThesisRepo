@@ -65,7 +65,13 @@ class WheatDataset(Dataset):
         unique_indices = {value: index for index, value in enumerate(unique_values)}
         print(unique_indices)
         self.domain_index = annotations['domain_index'] = annotations['domain'].map(unique_indices)
-       
+        # Inverse of unique_indices, so evaluate_map() can resolve a
+        # per-domain result's integer domain_index back to the domain name
+        # (this dataset instance's mapping -- built independently per split,
+        # so only valid against domain_index values produced by this same
+        # WheatDataset instance).
+        self.domain_names = {index: value for value, index in unique_indices.items()}
+
         self.transform = transform
 
     def __len__(self):
@@ -718,11 +724,32 @@ def evaluate_map(
     """
     Evaluate global mAP on one complete dataset split.
 
-    The primary thesis metric is mAP@50.
+    The primary thesis metric is mAP@50. This also computes a per-domain
+    mAP@50 breakdown, printed here and returned as a second value so the
+    --eval_map caller can write it to its own CSV, using the same
+    per-image-averaged methodology as the baseline/GRL scripts
+    (train_GWHD_baseline_clean.py's and train_GWHD_dgfrcnn_mattia.py's
+    on_validation_epoch_end): for each image, a fresh single-image mAP@50
+    is computed and appended to that image's domain, then all per-image
+    values within a domain are averaged. Matching that (quirky, but
+    already-used-for-two-methods) methodology exactly is what keeps the
+    CORAL numbers comparable to the existing baseline/GRL per-domain
+    numbers, rather than introducing a third, differently-computed metric.
+    Assumes batch_size=1, which is what this script's val/test dataloaders
+    already use.
+
+    Returns (results, per_domain_rows) where results is the existing
+    map/map_50/map_75 dict and per_domain_rows is a list of
+    {"domain_index", "domain_name", "num_images", "map_50"} dicts, one per
+    domain present in `dataloader`. domain_name is resolved via
+    dataloader.dataset.domain_names (see WheatDataset.__init__) -- falls
+    back to the raw index (as a string) if that attribute is missing.
     """
 
     detector.eval()
     detector.to(device)
+
+    domain_names = getattr(dataloader.dataset, "domain_names", {})
 
     metric = MeanAveragePrecision(
         iou_type="bbox",
@@ -730,6 +757,13 @@ def evaluate_map(
         iou_thresholds=[0.1, 0.5, 0.75],
         extended_summary=True,
     ).to(device)
+
+    per_domain_metric = MeanAveragePrecision(
+        iou_type="bbox",
+        class_metrics=True,
+        iou_thresholds=[0.5],
+    ).to(device)
+    per_domain_mAP = {}
 
     for batch in tqdm(dataloader, desc="mAP evaluation"):
 
@@ -759,6 +793,23 @@ def evaluate_map(
             targets,
         )
 
+        # Per-domain breakdown (batch_size=1, so batch[2] holds one
+        # domain label for this single image).
+        try:
+            per_domain_metric.update(predictions, targets)
+            domain = batch[2][0].item()
+            if domain in per_domain_mAP:
+                per_domain_mAP[domain].append(
+                    per_domain_metric.compute()["map_50"].detach().cpu()
+                )
+                per_domain_metric.reset()
+            else:
+                per_domain_mAP[domain] = [
+                    per_domain_metric.compute()["map_50"].detach().cpu()
+                ]
+        except Exception:
+            print(targets)
+
     results = metric.compute()
 
     print("\nEvaluation results")
@@ -773,6 +824,20 @@ def evaluate_map(
             f"{results['map_per_class'].detach().cpu().tolist()}"
         )
 
+    print("\nPer-domain mAP@50 (domain, mean, num_images)")
+    print("==================")
+    per_domain_rows = []
+    for key in sorted(per_domain_mAP.keys()):
+        values = torch.stack(per_domain_mAP[key])
+        mean_map_50 = float(torch.mean(values).item())
+        print(key, mean_map_50, len(values))
+        per_domain_rows.append({
+            "domain_index": key,
+            "domain_name": domain_names.get(key, str(key)),
+            "num_images": len(values),
+            "map_50": mean_map_50,
+        })
+
     return {
         "map_mean_iou_10_50_75": float(
             results["map"].item()
@@ -783,7 +848,7 @@ def evaluate_map(
         "map_75": float(
             results["map_75"].item()
         ),
-    }
+    }, per_domain_rows
   
 if __name__ == '__main__':
 
@@ -950,7 +1015,7 @@ if __name__ == '__main__':
         f"\nEvaluating {split_name} split..."
     )
 
-    results = evaluate_map(
+    results, per_domain_rows = evaluate_map(
         detector=detector,
         dataloader=eval_dataloader,
         device=device,
@@ -971,6 +1036,22 @@ if __name__ == '__main__':
 
     print(
         f"\nSaved results to {output_path}"
+    )
+
+    per_domain_output_path = os.path.join(
+        NET_FOLDER,
+        f"{weights_file}_{args.eval_split}_per_domain_map.csv",
+    )
+
+    pd.DataFrame([
+        {"split": args.eval_split, **row} for row in per_domain_rows
+    ]).to_csv(
+        per_domain_output_path,
+        index=False,
+    )
+
+    print(
+        f"Saved per-domain results to {per_domain_output_path}"
     )
 
     sys.exit(0)
