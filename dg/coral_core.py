@@ -7,12 +7,12 @@ import torch.nn as nn
 
 
 def zero_loss(reference: torch.Tensor) -> torch.Tensor:
-    """Differentiable scalar zero on the same device/dtype as reference."""
+    """a zero you can still backprop through, on the same device/dtype as reference"""
     return reference.sum() * 0.0
 
 
 def sample_rows(x: torch.Tensor, max_samples: Optional[int]) -> torch.Tensor:
-    """Randomly subsample rows without replacement."""
+    """grab a random subset of rows, no replacement"""
     if max_samples is None or x.shape[0] <= max_samples:
         return x
     idx = torch.randperm(x.shape[0], device=x.device)[:max_samples]
@@ -20,16 +20,7 @@ def sample_rows(x: torch.Tensor, max_samples: Optional[int]) -> torch.Tensor:
 
 
 def covariance(x: torch.Tensor, eps: float = 0.0) -> Optional[torch.Tensor]:
-    """
-    Sample covariance of row-wise feature vectors.
-
-    Args:
-        x: [N, D]
-        eps: optional diagonal regularizer
-
-    Returns:
-        [D, D] covariance matrix, or None when N < 2.
-    """
+    """covariance of [n, d] features, gives back [d, d] or None if n < 2"""
     if x.ndim != 2:
         raise ValueError(f"Expected [N, D] features, got {tuple(x.shape)}")
     if x.shape[0] < 2:
@@ -50,7 +41,7 @@ def deep_coral_from_covariances(
     cov_a: torch.Tensor,
     cov_b: torch.Tensor,
 ) -> torch.Tensor:
-    """Standard Deep CORAL distance between two covariance matrices."""
+    """the normal deep coral distance between two covariance matrices"""
     if cov_a.shape != cov_b.shape:
         raise ValueError(
             f"Covariance shapes must match, got {cov_a.shape} and {cov_b.shape}"
@@ -60,11 +51,10 @@ def deep_coral_from_covariances(
 
 
 def mean_pairwise_coral(covariances: Iterable[torch.Tensor]) -> torch.Tensor:
-    """
-    Mean Deep CORAL loss over all unordered pairs.
+    """average coral loss over every pair, without actually looping over pairs
 
-    Uses the covariance barycenter identity, avoiding explicit O(K^2) pair loops.
-    The scaling is chosen so K=2 exactly equals standard pairwise Deep CORAL.
+    goes through the barycenter instead so it's not o(k^2), and the scaling is
+    picked so k=2 lands exactly on normal pairwise deep coral
     """
     covs = list(covariances)
     if len(covs) < 2:
@@ -82,8 +72,8 @@ def mean_pairwise_coral(covariances: Iterable[torch.Tensor]) -> torch.Tensor:
         .mean()
     )
 
-    # Average unordered pairwise squared distance:
-    # 2K/(K-1) * mean_i ||Ci - Cbar||_F^2
+    #average pairwise squared distance:
+    #2k/(k-1) * mean_i ||ci - cbar||_f^2
     mean_pairwise_sq = (2.0 * k / float(k - 1)) * mean_sq_to_center
     return mean_pairwise_sq / (4.0 * d * d)
 
@@ -93,9 +83,7 @@ def normalized_covariance_distance(
     cov_b: torch.Tensor,
     eps: float = 1e-8,
 ) -> torch.Tensor:
-    """
-    Scale-invariant covariance distance, used for image/instance consistency.
-    """
+    """covariance distance that ignores scale, used for the image/instance consistency term"""
     if cov_a.shape != cov_b.shape:
         raise ValueError(
             f"Consistency covariances must share shape, got "
@@ -108,12 +96,11 @@ def normalized_covariance_distance(
 
 
 class FixedRandomProjection(nn.Module):
-    """
-    Non-trainable orthonormal random projection.
+    """random orthonormal projection that never trains
 
-    Keeping the projection fixed prevents the auxiliary CORAL branch from
-    learning a trivial zero projection while still allowing gradients to flow
-    back into the detector features.
+    if this could learn it would just collapse to zero and the coral branch
+    would be free, so it stays frozen, gradients still get through to the
+    detector features though
     """
 
     def __init__(self, in_dim: int, out_dim: int, seed: int = 42):

@@ -12,9 +12,9 @@
 #SBATCH --partition=research
 #SBATCH --account=research
 
-# Quick sanity check before committing a full run: confirms the venv, CUDA,
-# and GWHD data path all work. 1 epoch, tiny batch, capped steps.
-# Usage: sbatch hpc/smoke_test.slurm
+# quick sanity check before burning a full run, just confirms the venv, cuda and
+# the gwhd data path all work, 1 epoch, tiny batch, capped steps
+# usage: sbatch hpc/smoke_test.slurm
 set -euo pipefail
 
 mkdir -p hpc_logs runs/smoke_hpc/checkpoints runs/smoke_hpc/logs

@@ -14,7 +14,8 @@ echo "Experiment: ${EXP_NUM}"
 echo "Run directory: ${RUN_DIR}"
 echo "Run WADA after training: ${RUN_WADA}"
 
-# Prefer persistent conda if installed in /workspace; fall back to ~/miniconda3.
+#use the conda in /workspace if it's there, it survives a pod restart,
+#otherwise fall back to the one in home
 if [ -f /workspace/miniconda3/etc/profile.d/conda.sh ]; then
   source /workspace/miniconda3/etc/profile.d/conda.sh
 else

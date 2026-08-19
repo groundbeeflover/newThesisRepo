@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# One-time conda environment setup on the FSE CSlab HPC login node.
-# Installs Miniconda into persistent storage (/data), symlinks it to
-# ~/miniconda3 so it matches the path convention already used by
-# run_gwhd_dg.sh / run_gwhd_baseline.sh, creates the DGOD env, and
-# installs requirements.txt.
+# one time conda setup on the fse cslab hpc login node, drops miniconda into
+# persistent storage (/data), symlinks it to ~/miniconda3 so it matches the path
+# the runpod scripts already assume, makes the DGOD env and installs
+# requirements.txt
 #
-# Run from the root of newThesisRepo: bash hpc/setup_env.sh
+# run it from the root of newThesisRepo: bash hpc/setup_env.sh
 set -euo pipefail
 
 DATA_DIR="/i6356965"
@@ -24,8 +23,8 @@ else
   echo "Miniconda already installed at ${CONDA_DIR}, skipping install."
 fi
 
-# Symlink so ~/miniconda3 works too (matches the fallback path already
-# hardcoded in run_gwhd_dg.sh / run_gwhd_baseline.sh).
+#symlink so ~/miniconda3 works too, that's the fallback path already hardcoded
+#in run_gwhd_dg.sh and run_gwhd_baseline.sh
 if [ ! -e "${HOME}/miniconda3" ]; then
   ln -s "${CONDA_DIR}" "${HOME}/miniconda3"
 fi

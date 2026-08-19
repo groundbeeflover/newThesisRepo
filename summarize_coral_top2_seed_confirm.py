@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Aggregate the multi-seed confirmation runs produced by
-run_coral_top2_seed_confirm.sh for the two leading CORAL sampler configs from
-the bs2-vs-bs8 sampling ablation (diverse_bs8, capped2_bs8 -- see that
-script's header for the full ranking and where the numbers came from).
+pulls together the multi seed confirmation runs from
+run_coral_top2_seed_confirm.sh for the two best coral sampler configs out of the
+sampling ablation, diverse_bs8 and capped2_bs8, that script's header has the
+full ranking and where the numbers came from
 
-For each tag, reads (from --results_dir, default coral_top2_seed_runs/):
-  <tag>_seed<N>_val_map.csv    evaluate_map() output, val split
-  <tag>_seed<N>_test_map.csv   evaluate_map() output, test split
+per tag it reads, out of --results_dir (coral_top2_seed_runs/ by default):
+  <tag>_seed<N>_val_map.csv    evaluate_map output, val split
+  <tag>_seed<N>_test_map.csv   evaluate_map output, test split
 
-and prints/saves one row per tag with the mean/std of val and test mAP@50
-across seeds, so "does the ablation's single-seed ranking survive seed
-variance" can be read off directly.
+and prints a row per tag with mean/std of val and test map@50 across the seeds,
+so i can tell straight away whether the ablation's single seed ranking actually
+holds up once seed variance is in play
 """
 
 import argparse

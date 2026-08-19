@@ -1,26 +1,24 @@
 from __future__ import absolute_import, division, print_function
 
 """
-Clean/pure Faster R-CNN baseline for GWHD, using torchvision's stock
-`fasterrcnn_resnet50_fpn` builder directly instead of the repo's custom
-`fasterrcnn.py` (FastWILDS) wrapper that `train_GWHD_dgfrcnn*.py` use for
-both the DG and non_dg experiments.
+plain faster r-cnn baseline for gwhd, straight off torchvision's
+fasterrcnn_resnet50_fpn instead of the repo's own fasterrcnn.py (fastwilds)
+wrapper that the train_GWHD_dgfrcnn* scripts use for both dg and non_dg
 
-Why this script exists: per Petra/Mattia's email (2026-08-12, "DGOD Code"),
-Mattia's successful reproduction of Seemakurthy et al. did NOT use Karthik's
-non_dg path for the baseline number -- he trained a fresh, un-modified
-torchvision Faster R-CNN instead. The custom `fasterrcnn.py` module
-overrides the RPN/ROI-head loss computation to be per-image rather than
-per-batch (needed for the DA heads' bookkeeping), which is a real behavioral
-difference from stock torchvision even with the DA heads switched off, and
-is suspected to be why earlier baseline-vs-GRL comparisons in this repo
-(grlbaselineruns/, grlbaseline1e-4/) came out statistically tied instead of
-showing the paper's gap.
+why this exists: going off petra and mattia's email (2026-08-12, "dgod code"),
+mattia's reproduction of seemakurthy et al did not use karthik's non_dg path for
+the baseline number, he trained a fresh unmodified torchvision faster r-cnn.
+the custom fasterrcnn.py rewrites the rpn/roi head losses to be per image rather
+than per batch, which the da heads need for bookkeeping but is still a real
+behavioural difference from stock torchvision even with those heads off. i
+reckon that's why the earlier baseline vs grl comparisons here
+(grlbaselineruns/, grlbaseline1e-4/) came out tied instead of showing the gap
+from the paper
 
-Everything *except* the detector itself (data pipeline, optimizer choice,
-LR schedule, early stopping, determinism handling) is kept identical to
-train_GWHD_dgfrcnn_mattia.py so the baseline and DGKarthik runs are as
-comparable as possible.
+everything other than the detector itself, so data pipeline, optimizer, lr
+schedule, early stopping and determinism, is kept identical to
+train_GWHD_dgfrcnn_mattia.py so the baseline and dgkarthik runs stay as
+comparable as they can be
 """
 
 import os
@@ -54,10 +52,9 @@ SEED = -1
 
 
 # ---------------------------------------------------------------------------
-# Dataset / transforms / collate_fn: copied verbatim from
-# train_GWHD_dgfrcnn_mattia.py for 1:1 data-pipeline parity with the
-# DGKarthik reproduction run (same CSVs, same [0,1]-scaled-only images,
-# same box decoding/clipping).
+#dataset, transforms and collate_fn copied straight out of
+#train_GWHD_dgfrcnn_mattia.py so the data pipeline matches the dgkarthik run
+#exactly, same csvs, same [0,1] scaled images, same box decoding and clipping
 # ---------------------------------------------------------------------------
 
 class WheatDataset(Dataset):
@@ -74,11 +71,9 @@ class WheatDataset(Dataset):
         self.domain_index = annotations["domain_index"] = annotations["domain"].map(
             unique_indices
         )
-        # Inverse of unique_indices, so evaluate_map() can resolve a
-        # per-domain result's integer domain_index back to the domain name
-        # (this dataset instance's mapping -- built independently per split,
-        # so only valid against domain_index values produced by this same
-        # WheatDataset instance).
+        #flip of unique_indices, lets evaluate_map turn a domain_index back
+        #into the actual domain name, built separately per split so it only
+        #lines up with indices that came out of this same dataset object
         self.domain_names = {index: value for value, index in unique_indices.items()}
         self.transform = transform
 
@@ -167,26 +162,23 @@ def collate_fn(batch):
 
 
 # ---------------------------------------------------------------------------
-# Model: stock torchvision Faster R-CNN, no repo customization.
+#the model, stock torchvision faster r-cnn with none of the repo's changes
 # ---------------------------------------------------------------------------
 
 class CleanFasterRCNN(LightningModule):
     def __init__(self, n_classes, lr, weight_decay):
         super().__init__()
 
-        # Stock torchvision builder. `weights=None` + default `weights_backbone`
-        # (ImageNet-pretrained ResNet50) matches the repo's own convention of
-        # `pretrained=False, pretrained_backbone=True` used everywhere else in
-        # this codebase (fasterrcnn.py's fasterrcnn_resnet50_fpn) -- so the
-        # backbone initialization is comparable to the DGKarthik run, only the
-        # detector implementation itself differs.
+        #stock torchvision builder, weights=None plus the default
+        #weights_backbone (imagenet resnet50) is the same as the
+        #pretrained=False, pretrained_backbone=True used everywhere else in this
+        #repo, so the backbone starts off comparable to the dgkarthik run and
+        #only the detector itself is different
         #
-        # image_mean=[0,0,0]/image_std=[1,1,1]: WheatDataset only scales pixels
-        # to [0,1] (see __getitem__, `image_tr = transformed["image"] / 255.0`),
-        # it does not apply ImageNet mean/std normalization. Passing the actual
-        # torchvision defaults here would silently double-normalize; this
-        # matches the "images are already normalized" trick used elsewhere in
-        # the repo (fasterrcnn.py's FastWILDS).
+        #image_mean=[0,0,0] and image_std=[1,1,1] because WheatDataset only
+        #divides the pixels by 255, it never does the imagenet mean/std bit
+        #leaving the real torchvision defaults in would normalize twice without
+        #telling you, so this is the same trick fastwilds pulls in fasterrcnn.py
         self.detector = fasterrcnn_resnet50_fpn(
             weights=None,
             num_classes=n_classes,
@@ -212,9 +204,9 @@ class CleanFasterRCNN(LightningModule):
         self.pr_file = "baseline"
 
     def forward(self, imgs, targets=None):
-        # Stock torchvision GeneralizedRCNN: returns loss dict in training
-        # mode, list of {boxes, labels, scores} dicts in eval mode -- no
-        # per-image loss splitting or custom RPN/ROI-head overrides.
+        #plain torchvision generalizedrcnn, gives back a loss dict in
+        #training and a list of {boxes, labels, scores} in eval, no per image
+        #loss splitting and no rpn/roi head overrides
         return self.detector(imgs, targets)
 
     def configure_optimizers(self):
@@ -312,30 +304,24 @@ class CleanFasterRCNN(LightningModule):
 
 
 def evaluate_map(detector, dataloader, device):
-    """
-    Evaluate global mAP on one complete dataset split, independent of the
-    Lightning training/validation loop. Gives a full map/map_50/map_75
-    breakdown and is used by the --eval_map post-training path so results
-    can be written to a per-run CSV -- same convention (and same CSV
-    schema) as train_GWHD_coralfrcnn.py's --eval_map path, so results from
-    either script are combinable with summarize_eval_results.py.
+    """global map over one whole split, nothing to do with the lightning loop
 
-    Also computes a per-domain mAP@50 breakdown, printed here and returned
-    as a second value so the --eval_map caller can write it to its own CSV.
-    Unlike the per-domain tracking in this class's Lightning
-    validation_step/on_validation_epoch_end (self.per_domain_mAP, which
-    accumulates across every validation epoch of an entire training run and
-    is therefore not a clean single-split snapshot), the per-domain dict
-    here is local to a single call of this function, so it reflects exactly
-    one pass over `dataloader` -- e.g. one clean test-set evaluation of a
-    finished checkpoint via --eval_map.
+    gives the full map/map_50/map_75 breakdown and is what --eval_map runs after
+    training so the results go into a per run csv, same schema as
+    train_GWHD_coralfrcnn.py's --eval_map path so either script's output works
+    with summarize_eval_results.py
 
-    Returns (results, per_domain_rows) where results is the existing
-    map/map_50/map_75 dict and per_domain_rows is a list of
-    {"domain_index", "domain_name", "num_images", "map_50"} dicts, one per
-    domain present in `dataloader`. domain_name is resolved via
-    dataloader.dataset.domain_names (see WheatDataset.__init__) -- falls
-    back to the raw index (as a string) if that attribute is missing.
+    also does a per domain map@50 breakdown, printed here and handed back as a
+    second value, the per domain tracking in the lightning
+    validation_step/on_validation_epoch_end piles up across every validation
+    epoch of a whole run so it isn't a clean single split snapshot, whereas the
+    dict in here is local to one call and is exactly one pass over the dataloader
+
+    comes back as (results, per_domain_rows), results being the usual
+    map/map_50/map_75 dict and per_domain_rows a list of
+    {"domain_index", "domain_name", "num_images", "map_50"}, one per domain in
+    the dataloader, domain_name comes off dataloader.dataset.domain_names and
+    falls back to the raw index as a string if that isn't there
     """
     detector.eval()
     detector.to(device)
@@ -372,8 +358,8 @@ def evaluate_map(detector, dataloader, device):
 
         metric.update(predictions, targets)
 
-        # Per-domain breakdown (assumes batch_size=1, as used for the
-        # val/test dataloaders this function is called with).
+        #per domain breakdown, assumes batch_size=1 which is what the val
+        #and test dataloaders here use anyway
         try:
             per_domain_metric.update(predictions, targets)
             domain = batch[2][0].item()
@@ -480,9 +466,9 @@ if __name__ == "__main__":
     SEED = args.seed
     print(f"SEED: {SEED}")
 
-    # Determinism block, verbatim from Mattia Dutto's email (2026-08-06,
-    # forwarded by Petra Bosilj 2026-08-12): random/numpy/pytorch_lightning/
-    # torch seeding plus cudnn determinism switches.
+    #determinism block, copied verbatim out of mattia dutto's email
+    #(2026-08-06, forwarded by petra bosilj 2026-08-12), seeds
+    #random/numpy/lightning/torch and flips the cudnn determinism switches
     random.seed(SEED)
     np.random.seed(SEED)
     pytorch_lightning.seed_everything(SEED)
@@ -538,11 +524,10 @@ if __name__ == "__main__":
 
     detector = CleanFasterRCNN(n_classes=2, lr=args.lr, weight_decay=args.weight_decay)
 
-    # --eval_map: separate, post-training invocation (see run_repro_baseline.sh)
-    # that loads the checkpoint this seed already trained and writes a results
-    # CSV -- kept out of the training path so each seed gets its own train log
-    # (this process's stdout) and its own test log (the --eval_map process's
-    # stdout) instead of one merged log file.
+    #--eval_map is a separate run after training (see run_repro_baseline.sh)
+    #that loads the checkpoint this seed already trained and writes the results
+    #csv, keeping it out of the training path means each seed gets its own train
+    #log and its own test log instead of one merged file
     if args.eval_map:
         ckpt_path = os.path.join(NET_FOLDER, weights_file + ".ckpt")
         if not os.path.exists(ckpt_path):
@@ -584,22 +569,20 @@ if __name__ == "__main__":
     early_stop_callback = EarlyStopping(
         monitor="val_acc", min_delta=0.00, patience=10, verbose=False, mode="max"
     )
-    # save_last=True: writes NET_FOLDER/last.ckpt every epoch (in addition to the
-    # best-val_acc checkpoint under `weights_file`). This is what lets a run resume
-    # cleanly across multiple SLURM submissions when the partition's walltime cap
-    # (e.g. education = 2h) is shorter than a full training run.
+    #save_last=True drops a NET_FOLDER/last.ckpt every epoch on top of the
+    #best val_acc one under weights_file, that's what lets a run pick back up
+    #across several slurm submissions when the partition's walltime cap
+    #(education is 2h) is shorter than a full training run
     checkpoint_callback = ModelCheckpoint(
         monitor="val_acc", dirpath=NET_FOLDER, filename=weights_file, mode="max",
         save_last=True,
     )
-    # NOTE: dirpath (NET_FOLDER) is shared across all seeds of a repro run
-    # (run_repro_baseline.sh passes the same --weights_folder for seeds
-    # 0/1/2, only --weights_file differs). save_last=True would otherwise
-    # write a single generic "last.ckpt" into that shared directory, so a
-    # later seed's auto-resume check below would find and resume from the
-    # *previous* seed's last checkpoint instead of starting fresh. Namespace
-    # the "last" checkpoint by weights_file to keep each seed's resume state
-    # isolated.
+    #dirpath (NET_FOLDER) is shared by every seed of a repro run, run_repro_baseline.sh
+    #passes the same --weights_folder each time and only changes --weights_file
+    #with save_last=True that'd mean one generic last.ckpt sitting in a shared
+    #folder, and the auto-resume check below would happily pick up the previous
+    #seed's checkpoint instead of starting clean, so name the last checkpoint
+    #after weights_file and keep each seed's resume state to itself
     checkpoint_callback.CHECKPOINT_NAME_LAST = f"{weights_file}-last"
 
     trainer = Trainer(
@@ -611,9 +594,9 @@ if __name__ == "__main__":
         num_sanity_val_steps=2,
     )
 
-    # Resume from the last checkpoint if this is a re-submission of a run that
-    # got cut off by the walltime limit (full trainer state: weights, optimizer,
-    # LR scheduler, epoch count, early-stopping patience counter).
+    #if this is a resubmission of a run the walltime cut off, pick up from
+    #the last checkpoint, that restores the whole trainer state, weights,
+    #optimizer, lr scheduler, epoch count and the early stopping patience
     last_ckpt_path = os.path.join(NET_FOLDER, f"{weights_file}-last.ckpt")
     resume_from = last_ckpt_path if os.path.exists(last_ckpt_path) else None
     if resume_from:
@@ -628,9 +611,9 @@ if __name__ == "__main__":
         ckpt_path=resume_from,
     )
 
-    # Training ends here -- no inline post-fit validate/test. Run this same
-    # script again with --eval_map (see run_repro_baseline.sh) to evaluate the
-    # checkpoint just written and get a results CSV; that gives each seed its
-    # own test log and CSV, separate from this training log. The .done
-    # sentinel is written by the shell wrapper once both steps succeed, not
-    # here, since "done" now means train+eval both completed.
+    #training stops here, no validate/test tacked on the end, run this script
+    #again with --eval_map (see run_repro_baseline.sh) to score the checkpoint it just
+    #wrote and get the results csv, which keeps each seed's test log and csv
+    #separate from its training log, the .done sentinel gets written by the
+    #shell wrapper once both halves finish, not here, since done now means
+    #train and eval both went through

@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Aggregate mAP test results across the domain_capped(2) LR-sweep runs
-produced by run_all_evals.sh, grouped by learning rate.
+pulls together the map test results from the domain_capped(2) lr sweep that
+run_all_evals.sh produces, grouped by learning rate
 
-Each run's `--eval_map --eval_split test` call writes a CSV at
-<net_root>/<run_name>/<run_name>_test_map.csv (see evaluate_map's
-output_path in train_GWHD_coralfrcnn.py). This script reads all of those,
-combines them into one table, and reports mean +/- std per LR group so you
-can compare the two groups (and check within-group run-to-run variance from
-deterministic=False) directly.
+every run's --eval_map --eval_split test call drops a csv at
+<net_root>/<run_name>/<run_name>_test_map.csv, this reads the lot, sticks them
+in one table and gives mean +/- std per lr group, so i can compare the groups
+and see how much run to run wobble deterministic=False is causing
 """
 
 import argparse
@@ -19,7 +17,7 @@ import pandas as pd
 
 
 def parse_lr_tag(run_name: str) -> str:
-    """Pulls '1e4' / '1e5' etc. out of names like domcap2_bs8_lr1e4_run1."""
+    """digs the '1e4' or '1e5' bit out of names like domcap2_bs8_lr1e4_run1"""
     match = re.search(r"lr(1e\d+)", run_name)
     return match.group(1) if match else "unknown"
 

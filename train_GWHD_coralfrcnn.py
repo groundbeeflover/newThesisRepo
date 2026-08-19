@@ -40,8 +40,9 @@ from dg import (
     NaturalDomainBatchSampler,
 )
 
-# Overwritten by --seed in __main__ (before any seed-dependent object --
-# CORAL's fixed projection, the batch sampler, the model itself -- is built).
+#--seed in __main__ overwrites this, and it does it before anything that
+#depends on the seed gets built, so the coral projection, the batch sampler and
+#the model all see the right value
 SEED = 42
 
 class WheatDataset(Dataset):
@@ -65,11 +66,9 @@ class WheatDataset(Dataset):
         unique_indices = {value: index for index, value in enumerate(unique_values)}
         print(unique_indices)
         self.domain_index = annotations['domain_index'] = annotations['domain'].map(unique_indices)
-        # Inverse of unique_indices, so evaluate_map() can resolve a
-        # per-domain result's integer domain_index back to the domain name
-        # (this dataset instance's mapping -- built independently per split,
-        # so only valid against domain_index values produced by this same
-        # WheatDataset instance).
+        #flip of unique_indices, lets evaluate_map turn a domain_index back
+        #into the actual domain name, built separately per split so it only
+        #lines up with indices that came out of this same dataset object
         self.domain_names = {index: value for value, index in unique_indices.items()}
 
         self.transform = transform
@@ -162,17 +161,13 @@ def collate_fn(batch):
     return images, targets, torch.tensor(domain_labels), orig_img
 
 def detection_accuracy(src_boxes, pred_boxes, iou_threshold=0.5):
-    """
-    Seemakurthy-style GWHD detection accuracy for one image:
-        TP / (TP + FP + FN)
+    """seemakurthy style gwhd detection accuracy for one image, tp / (tp + fp + fn)
 
-    This follows the old train_GWHD.py logic:
-    - match predicted boxes to ground truth boxes using IoU threshold
-    - count true positives, false positives, false negatives
-    - handle empty GT / empty prediction cases explicitly
+    same logic as the old train_GWHD.py, match preds to gt on iou, count tp/fp/fn
+    and deal with the empty gt and empty prediction cases on their own
     """
 
-    # Keep everything on CPU for evaluation simplicity
+    #keep it all on cpu, simpler for eval
     src_boxes = src_boxes.detach().cpu()
     pred_boxes = pred_boxes.detach().cpu()
 
@@ -210,7 +205,7 @@ def detection_accuracy(src_boxes, pred_boxes, iou_threshold=0.5):
             return torch.tensor(1.0)
 
     else:
-        # total_gt > 0 and total_pred == 0
+        #there were gt boxes but we predicted nothing
         return torch.tensor(0.0)
 
 import fasterrcnn
@@ -227,9 +222,9 @@ class DGFRCNN(LightningModule):
         self.reg_weights = reg_weights
         self.num_domains = 18
 	
-        # CORAL replaces the four GRL classifier heads with one statistical
-        # loss module. The ROI projection is fixed (non-trainable), so the
-        # auxiliary branch cannot collapse to a trivial zero projection.
+        #coral swaps the four grl classifier heads for one statistical loss
+        #module, the roi projection is frozen so the extra branch can't just
+        #collapse to a zero projection and call it a day
         self.coral_losses = FRCNNCoralLosses(
             image_dim=256,
             roi_dim=1024,
@@ -249,10 +244,9 @@ class DGFRCNN(LightningModule):
         self.weight_decay = weight_decay
         self.optimizer_name = optimizer_name
 
-        # Bottleneck-isolation instrumentation (bs2-vs-bs8 CORAL sampling
-        # ablation, Aug 2026). Set from __main__ after the batch_sampler and
-        # weights_folder/weights_file are known; both are optional (None ->
-        # instrumentation is skipped) so this is safe for non_dg/eval runs.
+        #instrumentation for the sampling ablation, __main__ fills these in
+        #once the batch_sampler and the weights folder/file are known, all
+        #optional, None just means skip it, so non_dg and eval runs are fine
         self.coral_batch_sampler = None
         self.domain_hist_csv_path = None
         self.coral_diag_csv_path = None
@@ -281,8 +275,8 @@ class DGFRCNN(LightningModule):
       return self.detector(imgs)
     
     def configure_optimizers(self):
-      # FRCNNCoralLosses has no trainable parameters: its only projection is
-      # a fixed registered buffer. CORAL gradients flow into the detector.
+      #FRCNNCoralLosses has nothing to train, its only projection is a fixed
+      #buffer, the coral gradients go into the detector instead
       params = [
           {
               'params': self.detector.parameters(),
@@ -315,20 +309,20 @@ class DGFRCNN(LightningModule):
         })
 
 
-      # One detector forward pass supplies detection losses, backbone features,
-      # ROI features, and the already-assigned ROI training labels.
+      #one forward pass gets us the detection losses, the backbone features,
+      #the roi features and the roi labels that were already assigned
       detections = self.detector(imgs, targets)
       detection_loss = sum(
           loss
           #for each image in a batch there is a detection object
           for detection in detections
-          #for each image there is a series of losses which are summed 
+          #for each image there is a series of losses which are summed
           for loss in detection["losses"].values()
       )
-      #SUMMED ACROSS IMAGES IN BATCH
+      #summed across images in batch
 
 
-#start loss dictionary, the regular frcnn is already added. 
+#start loss dictionary, the regular frcnn is already added
       loss_dict = {
           "detection_loss": detection_loss,
       }
@@ -354,8 +348,8 @@ class DGFRCNN(LightningModule):
             "coral_ds_cls": self.reg_weights[4] * coral["ds_cls"],
         })
 
-        # Raw losses are logged separately because the GRL paper's alpha values
-        # are not expected to transfer directly to CORAL loss magnitudes.
+        #logging the raw losses too, the grl paper's alphas were never going
+        #to carry over to coral's loss magnitudes as is
         for name, value in coral.items():
           self.log(
               f"train/coral_raw_{name}",
@@ -390,8 +384,8 @@ class DGFRCNN(LightningModule):
       return {"loss": loss}
 
     def _record_coral_diag(self, diag: dict) -> None:
-        """Stash one training step's pre-cap sample-count diagnostics for
-        epoch-end aggregation (see on_train_epoch_end)."""
+        """park one step's pre-cap sample counts so on_train_epoch_end can
+        average them up later"""
         img_counts = list(diag["image_spatial_counts"].values())
         roi_counts = list(diag["roi_counts"].values())
         fg_counts = list(diag["roi_fg_counts"].values())
@@ -407,9 +401,9 @@ class DGFRCNN(LightningModule):
         }
         self._epoch_diag_records.append(record)
 
-        # Also surface as step-level scalars (Lightning auto-aggregates
-        # on_epoch=True means across the epoch too, redundant with the CSV
-        # below but convenient if you're just watching tensorboard).
+        #also log these per step, on_epoch=True means lightning averages them
+        #over the epoch as well, which doubles up with the csv below but is
+        #handy if i'm just watching tensorboard
         for name, value in record.items():
             self.log(
                 f"train/coral_diag_{name}",
@@ -424,20 +418,16 @@ class DGFRCNN(LightningModule):
         self._epoch_diag_records = []
 
     def on_train_epoch_end(self):
-        """
-        Dump two diagnostic CSVs for the bs2-vs-bs8 sampling ablation, one
-        row appended per epoch:
+        """writes two diagnostic csvs for the sampling ablation, a row per epoch
 
-        - <weights_file>_domain_histogram.csv: per-domain images_drawn /
-          oversample_ratio / times_recycled this epoch, from the active
-          batch_sampler (see dg/samplers.py get_last_epoch_stats()).
-        - <weights_file>_coral_diag.csv: epoch-mean of the per-step pre-cap
-          sample counts recorded by _record_coral_diag, i.e. whether the
-          2048/256 sample caps were actually binding and how scarce
-          foreground ROIs were per domain.
+        the domain histogram one has images_drawn, oversample_ratio and
+        times_recycled per domain, straight off the active batch_sampler, the
+        coral diag one has the epoch mean of the pre-cap sample counts from
+        _record_coral_diag, so whether the 2048/256 caps were actually biting
+        and how thin the foreground rois got per domain
 
-        Both are no-ops if the corresponding path/sampler wasn't wired up
-        from __main__ (e.g. non_dg runs, or eval-only invocations).
+        both quietly do nothing if __main__ never wired up the sampler or the
+        paths, which is the case for non_dg and eval only runs
         """
         epoch_idx = self.current_epoch
 
@@ -623,13 +613,10 @@ def parser_args():
 
 @torch.no_grad()
 def evaluate_wada(detector, dataloader, output_dir, score_threshold=0.5, iou_threshold=0.5, max_batches=None):
-    """
-    Evaluate a trained detector using a WADA/ADA-style metric on a dataloader.
+    """runs a wada/ada style metric over a dataloader
 
-    Returns:
-        domain_scores: dict[int, float]
-        wada: unweighted mean of per-domain accuracy values
-        global_accuracy: mean over all images, not domain-balanced
+    hands back the per domain scores, wada (plain mean of those) and
+    global_accuracy (mean over every image, not domain balanced)
     """
 
     detector.eval()
@@ -648,7 +635,7 @@ def evaluate_wada(detector, dataloader, output_dir, score_threshold=0.5, iou_thr
         
       images, boxes_list, domain_labels, orig_imgs = data_sample
 
-        # Dataloader batch size should be 1 for WADA evaluation
+        #wada eval wants a dataloader batch size of 1
       images = images.to(device)
 
       preds = detector(images)
@@ -685,10 +672,10 @@ def evaluate_wada(detector, dataloader, output_dir, score_threshold=0.5, iou_thr
     if len(domain_df) == 0:
         raise RuntimeError("No domain scores were computed. Check the dataloader/test set.")
 
-    # This is the domain-balanced score: mean of per-domain means.
+    #domain balanced score, the mean of the per domain means
     wada = float(domain_df["domain_accuracy"].mean())
 
-    # This is the image-balanced score: mean over every image.
+    #image balanced score, just the mean over every image
     global_accuracy = float(torch.stack(all_image_scores).mean().item())
 
     domain_df.to_csv(output_dir / "wada_per_domain.csv", index=False)
@@ -721,29 +708,23 @@ def evaluate_map(
     dataloader,
     device,
 ):
-    """
-    Evaluate global mAP on one complete dataset split.
+    """global map over one whole split
 
-    The primary thesis metric is mAP@50. This also computes a per-domain
-    mAP@50 breakdown, printed here and returned as a second value so the
-    --eval_map caller can write it to its own CSV, using the same
-    per-image-averaged methodology as the baseline/GRL scripts
-    (train_GWHD_baseline_clean.py's and train_GWHD_dgfrcnn_mattia.py's
-    on_validation_epoch_end): for each image, a fresh single-image mAP@50
-    is computed and appended to that image's domain, then all per-image
-    values within a domain are averaged. Matching that (quirky, but
-    already-used-for-two-methods) methodology exactly is what keeps the
-    CORAL numbers comparable to the existing baseline/GRL per-domain
-    numbers, rather than introducing a third, differently-computed metric.
-    Assumes batch_size=1, which is what this script's val/test dataloaders
-    already use.
+    map@50 is the number the thesis actually cares about, this also does a per
+    domain map@50 breakdown, printed here and handed back as a second value for
+    --eval_map to write to its own csv, it's worked out the same way the
+    baseline and grl scripts do it in on_validation_epoch_end, a fresh single
+    image map@50 per image, appended to that image's domain, then averaged
+    within the domain, it's a slightly odd way to do it but two methods already
+    use it, and matching it is the only way the coral per domain numbers stay
+    comparable instead of being a third differently computed metric, assumes
+    batch_size=1, which the val and test dataloaders here already use
 
-    Returns (results, per_domain_rows) where results is the existing
-    map/map_50/map_75 dict and per_domain_rows is a list of
-    {"domain_index", "domain_name", "num_images", "map_50"} dicts, one per
-    domain present in `dataloader`. domain_name is resolved via
-    dataloader.dataset.domain_names (see WheatDataset.__init__) -- falls
-    back to the raw index (as a string) if that attribute is missing.
+    comes back as (results, per_domain_rows), results being the usual
+    map/map_50/map_75 dict and per_domain_rows a list of
+    {"domain_index", "domain_name", "num_images", "map_50"}, one per domain in
+    the dataloader, domain_name comes off dataloader.dataset.domain_names and
+    falls back to the raw index as a string if that isn't there
     """
 
     detector.eval()
@@ -793,8 +774,8 @@ def evaluate_map(
             targets,
         )
 
-        # Per-domain breakdown (batch_size=1, so batch[2] holds one
-        # domain label for this single image).
+        #per domain breakdown, batch_size=1 so batch[2] is just the one
+        #domain label for this image
         try:
             per_domain_metric.update(predictions, targets)
             domain = batch[2][0].item()
@@ -853,18 +834,17 @@ def evaluate_map(
 if __name__ == '__main__':
 
   args = parser_args()
-  #take inputs from CLI arguments
+  #take inputs from cli arguments
 
   SEED = args.seed
   print(f"SEED: {SEED}")
 
-  # Determinism block, verbatim from Mattia Dutto's email (2026-08-06,
-  # forwarded by Petra Bosilj 2026-08-12), same as train_GWHD_baseline_clean.py
-  # / train_GWHD_dgfrcnn_mattia.py: random/numpy/pytorch_lightning/torch
-  # seeding plus cudnn determinism switches, gated behind --deterministic.
-  # Runs before the dataset/batch_sampler/model are built so SEED is correct
-  # everywhere it's consumed (coral_batch_sampler's seed=, CORAL's fixed
-  # projection_seed=).
+  #determinism block, copied verbatim out of mattia dutto's email (2026-08-06,
+  #forwarded by petra bosilj 2026-08-12), same as in train_GWHD_baseline_clean.py
+  #and train_GWHD_dgfrcnn_mattia.py, seeds random/numpy/lightning/torch and
+  #flips the cudnn switches, all behind --deterministic, has to run before the
+  #dataset, batch_sampler and model get built so SEED is right everywhere it
+  #ends up, the sampler's seed= and coral's projection_seed=
   random.seed(SEED)
   np.random.seed(SEED)
   pytorch_lightning.seed_everything(SEED)
@@ -891,7 +871,7 @@ if __name__ == '__main__':
   # Training Dataset  
   
   
-  #load datasets 
+  #load datasets
   tr_dataset = WheatDataset('data/Annots/competition_train.csv', root_dir='data/gwhd_2021/images/', image_set = 'train', transform=train_transform) 
   vl_dataset = WheatDataset('data/Annots/competition_val.csv', root_dir='data/gwhd_2021/images/', image_set = 'val', transform=valid_transform)
   test_dataset = WheatDataset('data/Annots/competition_test.csv', root_dir='data/gwhd_2021/images/', image_set = 'tes', transform=valid_transform)
@@ -903,9 +883,9 @@ if __name__ == '__main__':
 
 #we have two ways of instantiating
   if args.exp == 'coral':
-    # Cross-domain CORAL needs at least two domains in every training batch.
-    # --sampler selects how that's enforced; see dg/samplers.py for the
-    # trade-offs between the three strategies.
+    #cross domain coral is useless unless there's two domains in the batch
+    #--sampler picks how that gets enforced, dg/samplers.py has the tradeoffs
+    #between the three
     if args.sampler == 'domain_diverse':
         coral_batch_sampler = DomainDiverseBatchSampler(
             domain_labels=tr_dataset.domain_index.tolist(),
@@ -933,7 +913,7 @@ if __name__ == '__main__':
         collate_fn=collate_fn,
         num_workers=args.num_workers,
     )
-    #but if we want to run the training without using the coral modules, we use a different dataloader method. both originate from the torch library though.
+    #but if we want to run the training without using the coral modules, we use a different dataloader method, both come from the torch library though
   else:
     train_dataloader = torch.utils.data.DataLoader(
         tr_dataset,
@@ -943,7 +923,7 @@ if __name__ == '__main__':
         num_workers=args.num_workers,
         drop_last=True,
     )
-#validation dataloader always has a batch size of 1. 
+#validation dataloader always has a batch size of 1
   val_dataloader = torch.utils.data.DataLoader(
       vl_dataset,
       batch_size=1,
@@ -951,7 +931,7 @@ if __name__ == '__main__':
       collate_fn=collate_fn,
       num_workers=args.num_workers
   )
-#same for test.
+#same for test
   test_dataloader = torch.utils.data.DataLoader(
       test_dataset,
       batch_size=1,
@@ -1056,7 +1036,7 @@ if __name__ == '__main__':
 
     sys.exit(0)
   
-    # WADA/ADA-style evaluation mode
+    #wada/ada style eval mode
   if args.eval_wada:
     ckpt_path = os.path.join(NET_FOLDER, weights_file + '.ckpt')
 
@@ -1089,7 +1069,7 @@ if __name__ == '__main__':
 
     sys.exit(0)
   
-  #train_dataloader = torch.utils.data.DataLoader(tr_subdataset, batch_size=8, shuffle=False, collate_fn=collate_fn, num_workers=0, drop_last=True)	
+  #train_dataloader = torch.utils.data.DataLoader(tr_subdataset, batch_size=8, shuffle=False, collate_fn=collate_fn, num_workers=0, drop_last=True)
   #val_dataloader = torch.utils.data.DataLoader(vl_subdataset, batch_size=1, shuffle=False,  collate_fn=collate_fn, num_workers=0)
   
   #detector = DGFRCNN(2, 8, args.exp, args.reg_weights)
@@ -1100,32 +1080,29 @@ if __name__ == '__main__':
     if not os.path.exists(NET_FOLDER):
       os.mkdir(NET_FOLDER, 0o777)
 
-  # Bottleneck-isolation instrumentation: wire the batch_sampler and output
-  # paths into the module so on_train_epoch_end can dump the domain-histogram
-  # and coral-diag CSVs (see dg/samplers.py, DGFRCNN.on_train_epoch_end).
+  #hand the batch_sampler and the output paths to the module so
+  #on_train_epoch_end can write out the domain histogram and coral diag csvs
   if args.exp == 'coral':
     detector.coral_batch_sampler = coral_batch_sampler
     detector.domain_hist_csv_path = os.path.join(NET_FOLDER, f"{weights_file}_domain_histogram.csv")
     detector.coral_diag_csv_path = os.path.join(NET_FOLDER, f"{weights_file}_coral_diag.csv")
 
   early_stop_callback= EarlyStopping(monitor='val_acc', min_delta=0.00, patience=10, verbose=False, mode='max')
-  # save_last=True: writes NET_FOLDER/last.ckpt every epoch (in addition to the
-  # best-val_acc checkpoint under `weights_file`), same convention as
-  # train_GWHD_baseline_clean.py / train_GWHD_dgfrcnn_mattia.py. This is what
-  # lets an interrupted CORAL run (spot/interruptible RunPod instance
-  # reclaimed, walltime cap hit) resume cleanly instead of restarting.
+  #save_last=True drops a NET_FOLDER/last.ckpt every epoch on top of the best
+  #val_acc one under weights_file, same as the other two training scripts, that's
+  #what lets an interrupted coral run pick back up rather than start over, which
+  #matters when runpod reclaims a spot instance or the walltime cap hits
   checkpoint_callback = ModelCheckpoint(
       monitor='val_acc', dirpath=NET_FOLDER, filename=weights_file, mode='max',
       save_last=True,
   )
-  # NOTE: dirpath (NET_FOLDER) is shared across all seeds of a repro run
-  # (run_repro_coral.sh / run_coral_top2_seed_confirm.sh pass the same
-  # --weights_folder for every seed, only --weights_file differs).
-  # save_last=True would otherwise write a single generic "last.ckpt" into
-  # that shared directory, so a later seed's auto-resume check below would
-  # find and resume from the *previous* seed's last checkpoint instead of
-  # starting fresh. Namespace the "last" checkpoint by weights_file to keep
-  # each seed's resume state isolated.
+  #dirpath (NET_FOLDER) is shared by every seed of a repro run, run_repro_coral.sh and
+  #run_coral_top2_seed_confirm.sh
+  #passes the same --weights_folder each time and only changes --weights_file
+  #with save_last=True that'd mean one generic last.ckpt sitting in a shared
+  #folder, and the auto-resume check below would happily pick up the previous
+  #seed's checkpoint instead of starting clean, so name the last checkpoint
+  #after weights_file and keep each seed's resume state to itself
   checkpoint_callback.CHECKPOINT_NAME_LAST = f"{weights_file}-last"
 
   # trainer = Trainer(
@@ -1147,9 +1124,10 @@ if __name__ == '__main__':
       num_sanity_val_steps=2
   )
 
-  # Resume from the last checkpoint if this is a re-submission of a run that
-  # got cut off (walltime limit, spot reclaim). Restores full trainer state:
-  # weights, optimizer, LR scheduler, epoch count, early-stopping patience.
+  #if this is a resubmission of a run that got cut off, walltime or a spot
+  #instance getting reclaimed, pick up from the last checkpoint, restores the
+  #whole trainer state, weights, optimizer, lr scheduler, epoch count and the
+  #early stopping patience
   last_ckpt_path = os.path.join(NET_FOLDER, f"{weights_file}-last.ckpt")
   resume_from = last_ckpt_path if os.path.exists(last_ckpt_path) else None
   if resume_from:
@@ -1165,10 +1143,10 @@ if __name__ == '__main__':
   )
   
   
-  # detector.pr_file = 'pr_'+weights_file 
+  # detector.pr_file = 'pr_'+weights_file
   # detector.load_state_dict(torch.load(NET_FOLDER+'/'+weights_file+'.ckpt')['state_dict'])
   # trainer = Trainer(accelerator="gpu", max_epochs=0, num_sanity_val_steps=-1)
-  # trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=test_dataloader)          
+  # trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=test_dataloader)
   #trainer.fit(detector, train_dataloaders=train_dataloader, val_dataloaders=train_dataloader)
   
   

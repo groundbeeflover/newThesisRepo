@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """
-Aggregate the CORAL bs2-vs-bs8 sampling-bottleneck ablation grid produced by
-run_coral_sampler_ablation.sh / run_gwhd_coral.sh.
+pulls together the coral sampling ablation grid that
+run_coral_sampler_ablation.sh and run_gwhd_coral.sh produce
 
-For each run tag, reads (from --results_dir, default coral_ablation_runs/):
+per run tag it reads, out of --results_dir (coral_ablation_runs/ by default):
   <tag>_config.json           sampler / batch_size / domains_per_batch / lr
-  <tag>_val_map.csv           evaluate_map() output, val split
-  <tag>_test_map.csv          evaluate_map() output, test split
-  <tag>_domain_histogram.csv  per-epoch, per-domain sampler stats (from
-                               dg/samplers.py get_last_epoch_stats(), dumped
-                               each epoch by DGFRCNN.on_train_epoch_end)
-  <tag>_coral_diag.csv        per-epoch means of the pre-cap sample-count
-                               diagnostics from FRCNNCoralLosses.forward()
+  <tag>_val_map.csv           evaluate_map output, val split
+  <tag>_test_map.csv          evaluate_map output, test split
+  <tag>_domain_histogram.csv  per epoch per domain sampler stats, written each
+                               epoch by DGFRCNN.on_train_epoch_end
+  <tag>_coral_diag.csv        per epoch means of the pre-cap sample counts out
+                               of FRCNNCoralLosses.forward
 
-and produces one row per tag with the mechanism axes (K = distinct domains
-forced per batch, samples/domain = batch_size / K) alongside the mAP results
-and the two bottleneck diagnostics, so the isolation question --
-"is it oversampling, K, or per-domain sample starvation?" -- can be read off
-directly instead of re-derived from logs.
+and spits out a row per tag with the mechanism axes (k = how many distinct
+domains get forced into a batch, samples/domain = batch_size / k) next to the
+map results and the two bottleneck diagnostics, point being i can just read off
+whether it's oversampling, k, or per domain sample starvation instead of
+digging it back out of the logs every time
 """
 
 import argparse
@@ -40,7 +39,7 @@ def load_config(results_dir: str, tag: str) -> dict:
         k = batch_size
     elif sampler == "domain_capped":
         k = domains_per_batch
-    else:  # natural: no fixed K, domains-per-batch is whatever falls out of chance
+    else:  #natural, no fixed k, domains per batch is whatever chance gives you
         k = None
 
     samples_per_domain = (batch_size / k) if k else None

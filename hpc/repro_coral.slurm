@@ -12,32 +12,32 @@
 #SBATCH --account=research
 #SBATCH --array=0-2
 
-# Cluster counterpart of run_repro_coral.sh -- deterministic CORAL run using
-# train_GWHD_coralfrcnn.py --exp coral: BS=8, LR=1e-5, reg_weights
-# 0.5 0.5 0.5 0.075 0.0001 (this repo's existing CORAL convention -- see
-# run_gwhd_coral.sh / hpc/train_coral.slurm), sampler domain_diverse, seeds
-# 0/1/2, fully deterministic. Unlike hpc/repro_baseline.slurm and
-# hpc/repro_dgkarthik.slurm, there is no external paper target number for
-# CORAL to reproduce -- this exists for parity with those two so all three
-# deterministic BS=8 runs (baseline / DGKarthik-GRL / CORAL) are comparable
-# to each other under identical seeding/determinism/VRAM-lever handling.
+# cluster version of run_repro_coral.sh, deterministic coral run off
+# train_GWHD_coralfrcnn.py --exp coral, bs=8, lr=1e-5, reg_weights
+# 0.5 0.5 0.5 0.075 0.0001 which is this repo's usual coral convention (see
+# run_gwhd_coral.sh and hpc/train_coral.slurm), sampler domain_diverse, seeds
+# 0/1/2, fully deterministic, unlike hpc/repro_baseline.slurm and
+# hpc/repro_dgkarthik.slurm there's no external paper number for coral to
+# reproduce, this exists so all three deterministic bs=8 runs, baseline,
+# dgkarthik-grl and coral, are comparable to each other under identical seeding,
+# determinism and vram handling
 #
-# Array index 0/1/2 -> seed 0/1/2, one job per seed, run concurrently.
+# array index 0/1/2 maps to seed 0/1/2, one job each, all running at once
 #
-# Runs on the `research` partition (MaxTime=7-00:00:00), not `education`
-# (MaxTime=02:00:00) -- see hpc/README.md §6. 24h is a generous single-shot
-# budget for 100 epochs/patience-10 early stopping.
+# runs on the research partition (MaxTime=7-00:00:00) rather than education
+# (MaxTime=02:00:00), see hpc/README.md section 6, 24h is a generous one shot
+# budget for 100 epochs with patience 10 early stopping
 #
-# The training script checkpoints every epoch and auto-resumes from
-# runs/.../checkpoints/last.ckpt if present. Resubmitting the same command is
-# always safe: resumes anything unfinished, skips anything already .done
-# (train_GWHD_coralfrcnn.py doesn't write that sentinel itself -- this script
-# writes it after a successful run, same as run_repro_coral.sh).
+# the training script checkpoints every epoch and picks back up from
+# runs/.../checkpoints/last.ckpt if it's there, resubmitting the same command is
+# always safe, it resumes whatever's unfinished and skips whatever's already
+# .done, though train_GWHD_coralfrcnn.py doesn't write that sentinel itself so
+# this script writes it after a successful run, same as run_repro_coral.sh
 #
-# Usage: sbatch hpc/repro_coral.slurm [lr]
-#   lr defaults to 1e-5, matching hpc/repro_baseline.slurm / repro_dgkarthik.slurm.
-# If a task OOMs (L40s have 48GB, so unlikely, but PHYS_BATCH/ACCUM_STEPS are
-# here for parity with run_repro_coral.sh in case you move a seed there):
+# usage: sbatch hpc/repro_coral.slurm [lr]
+#   lr defaults to 1e-5, matching repro_baseline.slurm and repro_dgkarthik.slurm
+# if a task ooms, and l40s have 48gb so it shouldn't, PHYS_BATCH/ACCUM_STEPS are
+# here to match run_repro_coral.sh in case you move a seed over there:
 # sbatch --export=ALL,PHYS_BATCH=4,ACCUM_STEPS=2 hpc/repro_coral.slurm
 set -euo pipefail
 
@@ -74,8 +74,8 @@ if [ -f "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.done" ]; then
   exit 0
 fi
 
-# NOTE: launched with srun so PyTorch Lightning's auto-detected SLURMEnvironment
-# plugin gets the handshake it expects (see hpc/README.md, section 4).
+#launched with srun so lightning's auto-detected slurm environment plugin
+#actually gets the handshake it wants (see hpc/README.md, section 4)
 srun python train_GWHD_coralfrcnn.py \
   --exp coral \
   --weights_folder "${RUN_DIR}/checkpoints" \
@@ -91,10 +91,10 @@ srun python train_GWHD_coralfrcnn.py \
   2>&1 | tee "${RUN_DIR}/logs/train_seed${SEED}.log"
 
 echo "=== coral seed ${SEED}: test evaluation ==="
-# Separate invocation, separate log: loads the checkpoint just trained and
-# writes ${WEIGHTS_FILE}_test_map.csv (map/map_50/map_75) into checkpoints/.
-# Mirrors run_repro_coral.sh's two-phase pattern -- without this second call,
-# no test log or results CSV is ever produced for this seed.
+#separate call, separate log, loads the checkpoint that just got trained and
+#writes ${WEIGHTS_FILE}_test_map.csv (map/map_50/map_75) into checkpoints/, the
+#same two phase thing run_repro_coral.sh does, without this second call this
+#seed never produces a test log or a results csv at all
 srun python train_GWHD_coralfrcnn.py \
   --exp coral \
   --weights_folder "${RUN_DIR}/checkpoints" \
@@ -103,6 +103,6 @@ srun python train_GWHD_coralfrcnn.py \
   --eval_split test \
   2>&1 | tee "${RUN_DIR}/logs/test_seed${SEED}.log"
 
-# Only mark this seed done once both training and eval have succeeded
-# (set -euo pipefail above means either failing exits the script first).
+#only mark the seed done once training and eval have both worked, set -euo
+#pipefail up top means either one failing kills the script before we get here
 touch "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.done"

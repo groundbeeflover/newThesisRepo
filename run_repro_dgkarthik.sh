@@ -1,52 +1,51 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# RunPod alternative to hpc/repro_dgkarthik.slurm -- runs Mattia Dutto's
-# DGKarthik (GRL) reproduction script (train_GWHD_dgfrcnn_mattia.py) for
-# seeds 0, 1, 2. Same conda-detection convention as run_gwhd_dg.sh /
-# run_gwhd_baseline.sh, and the same runs/gwhd_repro_dgkarthik_lr<LR>/ layout
-# hpc/repro_dgkarthik.slurm uses on the university cluster -- so results from
-# either source are drop-in comparable, whichever finishes first.
+# runpod version of hpc/repro_dgkarthik.slurm, runs mattia dutto's dgkarthik
+# (grl) reproduction script (train_GWHD_dgfrcnn_mattia.py) for seeds 0, 1 and 2
+# same runs/gwhd_repro_dgkarthik_lr<LR>/ layout the slurm script uses on the uni
+# cluster, so whichever one finishes first the results drop straight into the
+# same comparison
 #
-# BS=8 (hardcoded inside the script itself), LR=1e-5, alpha_4=0.055 (target
-# avg test mAP@0.5 ~= 60.3, see hpc/README.md §8), fully deterministic.
+# bs=8, hardcoded inside the script itself, lr=1e-5, alpha_4=0.055 (target avg
+# test map@0.5 around 60.3, see hpc/README.md section 8), fully deterministic
 #
-# reg_weights (a b c d e): only alpha_4 (d) was specified in Mattia's email as
-# "the only parameter of note" = 0.055. a/b/c/e are NOT confirmed -- this uses
-# this repo's existing convention (0.5 0.5 0.5 x 0.0001, see run_gwhd_dg.sh)
-# with only d swapped to 0.055. Edit REG_WEIGHTS below if Mattia confirms
-# different values.
+# on reg_weights (a b c d e): mattia's email only ever specified alpha_4 (d) as
+# "the only parameter of note" = 0.055, a/b/c/e are not confirmed, so this uses
+# this repo's existing convention, 0.5 0.5 0.5 x 0.0001 (see run_gwhd_dg.sh),
+# with only d swapped over, change REG_WEIGHTS below if mattia confirms anything
+# different
 #
-# Seeds run SEQUENTIALLY by default -- a single RunPod GPU may not have
-# headroom for 3 concurrent BS=8 Faster R-CNN + GRL-head trainings at once.
-# See the commented-out block at the bottom for a parallel alternative.
+# seeds run one after the other by default, a single runpod gpu probably can't
+# hold 3 concurrent bs=8 faster r-cnn + grl head trainings, there's a commented
+# out parallel version at the bottom
 #
-# IMPORTANT: unlike sbatch on the cluster, nothing here detaches this from
-# your terminal -- it's a plain foreground bash process. Run it inside
-# tmux/screen (or nohup) so it survives an SSH disconnect:
+# unlike sbatch on the cluster nothing here detaches from your terminal, it's
+# just a foreground bash process, run it in tmux or screen (or nohup) so an ssh
+# drop doesn't kill it:
 #   tmux new -s repro_dgkarthik
 #   bash run_repro_dgkarthik.sh
-#   # Ctrl-b d to detach; `tmux attach -t repro_dgkarthik` to reattach later
+#   #ctrl-b d to detach, tmux attach -t repro_dgkarthik to come back
 #
-# Usage: bash run_repro_dgkarthik.sh [lr]
-#   lr defaults to 1e-5 (the setting with a known target number). Pass 1e-4
-#   to run the other row Mattia mentions exists in the sheet (Sheet3, rows
-#   3+5) -- no target number for that one has been shared yet.
+# usage: bash run_repro_dgkarthik.sh [lr]
+#   lr defaults to 1e-5, the one with a known target number, pass 1e-4 to run the
+#   other row mattia says is in the sheet (sheet3, rows 3+5), nobody's shared a
+#   target for that one yet
 #
-# If you hit `torch.OutOfMemoryError` (this run is even more memory-hungry
-# than the baseline -- same BS=8 detector plus the DA heads on top -- so if
-# the baseline OOM'd on your GPU, expect this one to too): same two levers as
-# run_repro_baseline.sh, settable via env vars without editing this file:
+# if you get torch.OutOfMemoryError, and this run is hungrier than the baseline
+# since it's the same bs=8 detector with the da heads bolted on, so if the
+# baseline oom'd on your card expect this to as well, same two levers as
+# run_repro_baseline.sh and both are env vars:
 #
-#   PHYS_BATCH / ACCUM_STEPS -- split the effective BS=8 into smaller physical
-#   steps accumulated together. Keep PHYS_BATCH * ACCUM_STEPS = 8 to preserve
-#   the reproduction's effective batch size.
-#   Example: PHYS_BATCH=4 ACCUM_STEPS=2 bash run_repro_dgkarthik.sh
+#   PHYS_BATCH / ACCUM_STEPS splits the effective bs=8 into smaller physical
+#   steps that get accumulated, keep PHYS_BATCH * ACCUM_STEPS = 8 or the
+#   reproduction's effective batch size changes
+#   example: PHYS_BATCH=4 ACCUM_STEPS=2 bash run_repro_dgkarthik.sh
 #
 # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True below is a free fix for
-# fragmentation specifically (large "reserved but unallocated" in the OOM
-# message); use PHYS_BATCH/ACCUM_STEPS too if the physical batch itself is
-# just too big for the card.
+# fragmentation specifically, look for a big "reserved but unallocated" in the
+# oom message, use PHYS_BATCH/ACCUM_STEPS as well if the physical batch is just
+# too big for the card
 
 LR="${1:-1e-5}"
 ENV_NAME="DGOD"
@@ -63,7 +62,8 @@ RUN_DIR="runs/${RUN_NAME}"
 echo "Starting DGKarthik reproduction (lr=${LR}, reg_weights=${REG_WEIGHTS[*]}), seeds: ${SEEDS[*]}"
 echo "Physical batch=${PHYS_BATCH}, accumulate_grad_batches=${ACCUM_STEPS} (effective batch=$((PHYS_BATCH * ACCUM_STEPS)))"
 
-# Prefer persistent conda if installed in /workspace; fall back to ~/miniconda3.
+#use the conda in /workspace if it's there, it survives a pod restart,
+#otherwise fall back to the one in home
 if [ -f /workspace/miniconda3/etc/profile.d/conda.sh ]; then
   source /workspace/miniconda3/etc/profile.d/conda.sh
 else
@@ -89,12 +89,12 @@ for SEED in "${SEEDS[@]}"; do
   fi
 
   echo "=== dgkarthik seed ${SEED}: training ==="
-  # NOTE: train_GWHD_dgfrcnn_mattia.py checkpoints every epoch and auto-resumes
-  # from <weights_file>-last.ckpt if this seed was interrupted (e.g. a
-  # spot/interruptible pod got reclaimed) -- rerunning this script is always
-  # safe. No --num_workers flag here: the script hardcodes num_workers=16
-  # internally, it's not a CLI option (unlike train_GWHD_baseline_clean.py).
-  # Training-only: writes its own log and its own checkpoint.
+  #train_GWHD_dgfrcnn_mattia.py checkpoints every epoch and picks back up from
+  #<weights_file>-last.ckpt if this seed got interrupted, say a spot pod got
+  #reclaimed, so re-running this script is always safe, no --num_workers here,
+  #that script hardcodes num_workers=16 internally and doesn't expose it on the
+  #cli the way train_GWHD_baseline_clean.py does, this call only trains, it
+  #writes its own log and its own checkpoint
   python train_GWHD_dgfrcnn_mattia.py \
     --exp dg \
     --weights_folder "${RUN_DIR}/checkpoints" \
@@ -108,8 +108,8 @@ for SEED in "${SEEDS[@]}"; do
     2>&1 | tee "${RUN_DIR}/logs/train_seed${SEED}.log"
 
   echo "=== dgkarthik seed ${SEED}: test evaluation ==="
-  # Separate invocation, separate log: loads the checkpoint just trained and
-  # writes ${WEIGHTS_FILE}_test_map.csv (map/map_50/map_75) into checkpoints/.
+  #separate call, separate log, loads the checkpoint that just got trained and
+  #writes ${WEIGHTS_FILE}_test_map.csv (map/map_50/map_75) into checkpoints/
   python train_GWHD_dgfrcnn_mattia.py \
     --exp dg \
     --weights_folder "${RUN_DIR}/checkpoints" \
@@ -118,19 +118,19 @@ for SEED in "${SEEDS[@]}"; do
     --eval_split test \
     2>&1 | tee "${RUN_DIR}/logs/test_seed${SEED}.log"
 
-  # Only mark this seed done once both training and eval have succeeded
-  # (set -euo pipefail above means either failing exits the script first).
+  #only mark the seed done once training and eval have both worked, set -euo
+  #pipefail up top means either one failing kills the script before we get here
   touch "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.done"
 done
 
 echo "Done (or already were). Check ${RUN_DIR}/checkpoints/*.done to confirm which seeds finished."
 echo "Per-seed results: ${RUN_DIR}/checkpoints/dgkarthik_seed*_test_map.csv"
 
-# --- Optional: run all 3 seeds in parallel instead of sequentially --------
-# Only do this if you've confirmed your GPU has enough free VRAM for 3x the
-# per-process footprint. num_workers can't be reduced per-process here (see
-# note above), so 3 processes x 16 workers each may oversubscribe the pod's
-# vCPUs -- watch for degraded throughput if you try this.
+# --- optional, run all 3 seeds at once instead of one after the other ------
+# only bother if you've actually checked the gpu has 3x the per process vram
+# free, num_workers can't be turned down per process here (see the note above),
+# so 3 processes at 16 workers each might swamp the pod's vcpus, keep an eye out
+# for throughput dropping if you try it
 #
 # for SEED in "${SEEDS[@]}"; do
 #   WEIGHTS_FILE="dgkarthik_seed${SEED}"

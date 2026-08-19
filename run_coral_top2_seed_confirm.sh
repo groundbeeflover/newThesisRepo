@@ -1,63 +1,60 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Multi-seed confirmation runs for the top two sampler configs from the CORAL
-# bs2-vs-bs8 sampling ablation (see /home/freddy/school/thesis/coral_ablation_runs/
-# sampler_ablation_summary.csv and .../coral_ablation_results_for_supervisor/SUMMARY.md,
-# Aug 2026). All 7 ablation points ran a single seed (42) at lr=1e-4; ranked by
-# test mAP@50:
+# multi seed confirmation runs for the top two sampler configs out of the coral
+# sampling ablation (see coral_ablation_runs/sampler_ablation_summary.csv and
+# coral_ablation_results_for_supervisor/SUMMARY.md), all 7 ablation points ran a
+# single seed (42) at lr=1e-4, ranked by test map@50:
 #
-#   diverse_bs8   domain_diverse  K=8  samples/domain=1   0.633  (best)
-#   capped2_bs8   domain_capped   K=2  samples/domain=4   0.613  (2nd)
-#   diverse_bs2   domain_diverse  K=2  samples/domain=1   0.589
-#   capped4_bs8   domain_capped   K=4  samples/domain=2   0.588
-#   capped2_bs2   domain_capped   K=2  samples/domain=1   0.585  (historical baseline)
+#   diverse_bs8   domain_diverse  k=8  samples/domain=1   0.633  best
+#   capped2_bs8   domain_capped   k=2  samples/domain=4   0.613  2nd
+#   diverse_bs2   domain_diverse  k=2  samples/domain=1   0.589
+#   capped4_bs8   domain_capped   k=4  samples/domain=2   0.588
+#   capped2_bs2   domain_capped   k=2  samples/domain=1   0.585  historical baseline
 #   natural_bs8   natural         --   --                 0.568
-#   natural_bs2   natural         --   --                 0.544  (worst)
+#   natural_bs2   natural         --   --                 0.544  worst
 #
-# SUMMARY.md's own caveat: this project's historical baseline seed sweep showed
-# ~0.05-0.07 test-mAP50 spread at an *identical* config, and diverse_bs8 vs.
-# capped2_bs8 are only ~0.02 apart -- within that noise band on a single seed
-# each. This script is the proposed next step: 3 seeds (0,1,2) per config.
+# the caveat SUMMARY.md raises itself: this project's historical baseline seed
+# sweep showed 0.05 to 0.07 test map50 spread on an identical config, and
+# diverse_bs8 and capped2_bs8 are only about 0.02 apart, so on one seed each
+# they're inside the noise, this script is the obvious next step, 3 seeds (0,1,2)
+# per config
 #
-# Unlike the original ablation grid, this uses the SAME hyperparameter
-# convention as run_repro_baseline.sh / run_repro_dgkarthik.sh / run_repro_coral.sh
-# (the deterministic baseline/DGKarthik-GRL reproductions), not the ablation's
-# lr=1e-4 -- so results here are directly comparable to those runs, not just to
-# each other: LR=1e-5, BS=8, --num_workers 16, seeds 0/1/2, fully deterministic.
-# reg_weights stays this repo's existing CORAL convention (0.5 0.5 0.5 0.075
-# 0.0001 -- see run_gwhd_coral.sh/hpc/train_coral.slurm/run_repro_coral.sh);
-# only --sampler/--domains_per_batch differ between the two configs, matching
-# what the ablation actually varied.
+# unlike the original ablation grid this uses the same hyperparameters as
+# run_repro_baseline.sh, run_repro_dgkarthik.sh and run_repro_coral.sh rather
+# than the ablation's lr=1e-4, so the results here compare directly against those
+# deterministic runs and not just against each other, lr=1e-5, bs=8,
+# --num_workers 16, seeds 0/1/2, fully deterministic, reg_weights stays on this
+# repo's usual coral convention (0.5 0.5 0.5 0.075 0.0001), only --sampler and
+# --domains_per_batch change between the two configs, which is what the ablation
+# was varying anyway
 #
-# Same runs/gwhd_repro_coral_top2_<tag>_lr<LR>/ layout, checkpoint naming, and
-# config_snapshot/.done conventions as run_repro_coral.sh -- one such directory
-# per tag (diverse_bs8, capped2_bs8), each holding all 3 seeds.
+# same runs/gwhd_repro_coral_top2_<tag>_lr<LR>/ layout, checkpoint naming and
+# config_snapshot/.done conventions as run_repro_coral.sh, one directory per tag
+# (diverse_bs8, capped2_bs8) holding all 3 seeds
 #
-# IMPORTANT: unlike sbatch on the cluster, nothing here detaches this from
-# your terminal -- it's a plain foreground bash process. Run it inside
-# tmux/screen (or nohup) so it survives an SSH disconnect:
+# unlike sbatch on the cluster nothing here detaches from your terminal, it's
+# just a foreground bash process, run it in tmux or screen (or nohup) so an ssh
+# drop doesn't kill it:
 #   tmux new -s coral_top2_confirm
 #   bash run_coral_top2_seed_confirm.sh
-#   # Ctrl-b d to detach; `tmux attach -t coral_top2_confirm` to reattach later
+#   #ctrl-b d to detach, tmux attach -t coral_top2_confirm to come back
 #
-# Usage: bash run_coral_top2_seed_confirm.sh [lr]
-#   lr defaults to 1e-5, matching the baseline/dgkarthik/coral deterministic repros.
+# usage: bash run_coral_top2_seed_confirm.sh [lr]
+#   lr defaults to 1e-5, matching the other deterministic repros
 #
-# If you hit `torch.OutOfMemoryError`: same two independent levers as the other
-# run_repro_*.sh scripts, settable via env vars without editing this file --
-# PHYS_BATCH/ACCUM_STEPS to split the effective BS=8 into smaller accumulated
-# physical steps (keep PHYS_BATCH * ACCUM_STEPS = 8), and
-# PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True (already exported below) for
-# allocator fragmentation specifically:
+# if you get torch.OutOfMemoryError, same two levers as the other run_repro_*
+# scripts and both are env vars, PHYS_BATCH/ACCUM_STEPS splits the effective bs=8
+# into smaller accumulated physical steps (keep PHYS_BATCH * ACCUM_STEPS = 8),
+# and PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True, already exported below,
+# handles allocator fragmentation:
 #
 #   PHYS_BATCH=4 ACCUM_STEPS=2 bash run_coral_top2_seed_confirm.sh
 #
-# Safe to re-run: skips training for any (tag, seed) whose .done sentinel
-# already exists (train_GWHD_coralfrcnn.py auto-resumes any in-progress seed
-# from last.ckpt first), same as the other run_repro_*.sh scripts. Still runs
-# --eval_map afterward regardless, to (re)produce the val/test mAP CSVs the
-# aggregator below reads.
+# fine to re-run, any (tag, seed) with a .done sentinel skips training, and
+# train_GWHD_coralfrcnn.py resumes an in progress seed off last.ckpt first
+# anyway, --eval_map still runs either way so the val/test map csvs the
+# aggregator reads always get rebuilt
 
 LR="${1:-1e-5}"
 ENV_NAME="DGOD"
@@ -77,7 +74,8 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 echo "Confirming top-2 CORAL sampler configs (${TAGS[*]}) across seeds ${SEEDS[*]}"
 echo "lr=${LR}, reg_weights=${REG_WEIGHTS[*]}, physical batch=${PHYS_BATCH}, accumulate_grad_batches=${ACCUM_STEPS} (effective batch=$((PHYS_BATCH * ACCUM_STEPS)))"
 
-# Prefer persistent conda if installed in /workspace; fall back to ~/miniconda3.
+#use the conda in /workspace if it's there, it survives a pod restart,
+#otherwise fall back to the one in home
 if [ -f /workspace/miniconda3/etc/profile.d/conda.sh ]; then
   source /workspace/miniconda3/etc/profile.d/conda.sh
 else
@@ -115,9 +113,9 @@ for i in "${!TAGS[@]}"; do
     if [ -f "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.done" ]; then
       echo "Seed ${SEED} already completed (found ${WEIGHTS_FILE}.done). Skipping training."
     else
-      # NOTE: train_GWHD_coralfrcnn.py checkpoints every epoch and auto-resumes
-      # from last.ckpt if this seed was interrupted (e.g. a spot/interruptible
-      # pod got reclaimed) -- rerunning this script is always safe.
+      #train_GWHD_coralfrcnn.py checkpoints every epoch and picks back up from
+      #last.ckpt if this seed got interrupted, say a spot pod got reclaimed, so
+      #re-running this script is always safe
       python train_GWHD_coralfrcnn.py \
         --exp coral \
         --weights_folder "${RUN_DIR}/checkpoints" \
@@ -133,9 +131,9 @@ for i in "${!TAGS[@]}"; do
         --deterministic \
         2>&1 | tee "${RUN_DIR}/logs/train_seed${SEED}.log"
 
-      # train_GWHD_coralfrcnn.py doesn't write a WEIGHTS_FILE.done sentinel
-      # itself (unlike train_GWHD_baseline_clean.py / train_GWHD_dgfrcnn_mattia.py)
-      # -- write one here so the skip-if-done check above works the same way.
+      #train_GWHD_coralfrcnn.py doesn't write its own WEIGHTS_FILE.done
+      #sentinel the way the baseline and mattia scripts do, so write one here
+      #and the skip-if-done check above behaves the same
       touch "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.done"
     fi
 

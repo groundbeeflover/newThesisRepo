@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Runs --eval_map --eval_split test on every checkpoint produced by the
-# domain_capped(2) LR-sweep training runs, then aggregates the results.
+# runs --eval_map --eval_split test over every checkpoint the domain_capped(2)
+# lr sweep produced, then aggregates the lot
 #
-# Expects the 6 checkpoints from the earlier training command to already
-# exist at ${NET_ROOT}/<run_name>/<run_name>.ckpt. Must be launched from
-# wherever train_GWHD_coralfrcnn.py resolves its data/Annots/... relative
-# paths from (normally the newThesisRepo root) -- adjust NET_ROOT below if
-# your coral_runs/ directory lives somewhere else relative to that cwd.
+# expects the 6 checkpoints from the earlier training command to already be
+# sitting at ${NET_ROOT}/<run_name>/<run_name>.ckpt, launch it from wherever
+# train_GWHD_coralfrcnn.py resolves its data/Annots/... paths from, normally the
+# newThesisRepo root, and change NET_ROOT below if coral_runs/ lives somewhere
+# else relative to that
 
 set -euo pipefail
 

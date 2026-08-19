@@ -12,8 +12,8 @@
 #SBATCH --partition=research
 #SBATCH --account=research
 
-# Usage: sbatch hpc/train_coral.slurm <exp: coral|non_dg> <tag>
-# Example: sbatch hpc/train_coral.slurm coral run01
+# usage: sbatch hpc/train_coral.slurm <exp: coral|non_dg> <tag>
+# example: sbatch hpc/train_coral.slurm coral run01
 set -euo pipefail
 
 EXP="${1:-coral}"
@@ -42,8 +42,8 @@ if [ -f "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.ckpt" ]; then
   exit 1
 fi
 
-# NOTE: launched with srun so PyTorch Lightning's auto-detected SLURMEnvironment
-# plugin actually gets the handshake it expects (see hpc/README.md, section 4).
+#launched with srun so lightning's auto-detected slurm environment plugin
+#actually gets the handshake it wants (see hpc/README.md, section 4)
 srun python train_GWHD_coralfrcnn.py \
   --exp "${EXP}" \
   --weights_folder "${RUN_DIR}/checkpoints" \

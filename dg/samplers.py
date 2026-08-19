@@ -9,15 +9,12 @@ from torch.utils.data import Sampler
 
 def _epoch_stats(domains: List[int], group_sizes: Dict[int, int],
                   image_counts: Dict[int, int], refill_counts: Dict[int, int]) -> List[dict]:
-    """
-    Shared helper for the bottleneck-isolation diagnostics (see thesis notes on
-    CORAL bs2-vs-bs8 sampling ablation, Aug 2026).
+    """shared bit for the sampling diagnostics, used by all three samplers
 
-    images_drawn / domain_size = how many times that domain's images were
-    revisited this epoch in expectation terms; refill_count - 1 = how many
-    times its pool was fully exhausted and reshuffled mid-epoch (0 means it
-    never wrapped around). Both are logged per-domain so oversampling can be
-    read off directly instead of inferred from batch_size alone.
+    images_drawn / domain_size is roughly how many times a domain got revisited
+    this epoch, and times_recycled is how often its pool ran dry and got
+    reshuffled (0 means it never wrapped), logging both per domain so i can just
+    read the oversampling off instead of guessing it from batch_size
     """
     rows = []
     for d in domains:
@@ -35,21 +32,18 @@ def _epoch_stats(domains: List[int], group_sizes: Dict[int, int],
 
 
 class DomainDiverseBatchSampler(Sampler[List[int]]):
-    """
-    Domain-balanced batch sampler that draws distinct domains within each batch.
+    """every image in a batch comes from a different domain
 
-    Designed for CORAL training where a cross-domain loss is zero unless at
-    least two domains occur in the minibatch. Smaller domains are naturally
-    oversampled because exhausted domain buckets are reshuffled and reused.
+    coral needs at least two domains in a batch or the loss is just zero, so
+    this guarantees it, small domains end up oversampled because their buckets
+    get reshuffled and reused once they run out
 
-    Caveat (see DomainCappedBatchSampler below): this sampler ties the number
-    of distinct domains in a batch to batch_size itself (one image per chosen
-    domain, always). That means samples-per-domain is pinned at 1 no matter
-    how large batch_size gets, so growing batch_size only adds more pairwise
-    domain terms to the CORAL loss without ever improving the per-domain
-    covariance estimates that loss depends on. This is a likely explanation
-    for CORAL mAP@50 degrading at larger batch sizes; kept here for ablation
-    comparisons against the alternatives below.
+    the annoying part (which is why DomainCappedBatchSampler exists): this ties
+    the number of domains to batch_size, one image per domain always, so
+    samples-per-domain is stuck at 1 forever, and bumping batch_size just adds
+    more pairwise terms without making any of the per-domain covariances any
+    better, probably why coral map@50 gets worse at bigger batch sizes, keeping
+    it around for the ablation
     """
 
     def __init__(
@@ -68,7 +62,7 @@ class DomainDiverseBatchSampler(Sampler[List[int]]):
         for idx, domain in enumerate(labels):
             self.groups[domain].append(idx)
 
-        #orders the dictionary numerically by domain, makes it predictable. 
+        #orders the dictionary numerically by domain, makes it predictable
         self.domains = sorted(self.groups.keys())
         #throws error if there are less than two domains
         if len(self.domains) < 2:
@@ -96,7 +90,7 @@ class DomainDiverseBatchSampler(Sampler[List[int]]):
         return self.num_batches
 
     def get_last_epoch_stats(self) -> List[dict]:
-        """Per-domain oversampling stats for the most recently completed epoch."""
+        """per domain oversampling stats for whatever epoch just finished"""
         group_sizes = {d: len(self.groups[d]) for d in self.domains}
         return _epoch_stats(self.domains, group_sizes, self._image_counts, self._refill_counts)
 
@@ -110,7 +104,7 @@ class DomainDiverseBatchSampler(Sampler[List[int]]):
         pools = {} #shuffled dictionary of entries per domain
         cursors = {} #pointer for each domain in the pool (index)
 
-        #refills the indexes for one domain.
+        #refills the indexes for one domain
         def refill(domain: int):
             values = list(self.groups[domain])
             rng.shuffle(values)
@@ -137,24 +131,19 @@ class DomainDiverseBatchSampler(Sampler[List[int]]):
 
 
 class DomainCappedBatchSampler(Sampler[List[int]]):
-    """
-    Domain-balanced batch sampler that caps the number of *distinct* domains
-    per batch at ``domains_per_batch`` (default 2) instead of tying it to
-    batch_size.
+    """caps how many domains show up per batch at domains_per_batch (2 by default)
+    instead of letting batch_size decide
 
-    This mirrors the source/target pair structure used by Sun & Saenko's
-    Deep CORAL paper and reference implementations: each batch is made of a
-    small number of same-domain groups, each large enough to give a stable
-    covariance estimate. Samples-per-domain = batch_size // domains_per_batch,
-    so unlike DomainDiverseBatchSampler, per-domain sample count *grows*
-    with batch_size instead of always being 1. Domain pairs (or k-tuples) are
-    drawn at random each batch, so all C(num_domains, domains_per_batch)
-    combinations get covered over the course of training rather than fixing
-    one pair for a whole epoch as the original 2-domain UDA setting would.
+    this is closer to the source/target pair setup in sun & saenko's deep coral
+    paper, a couple of same-domain groups per batch, each big enough that the
+    covariance actually means something, samples-per-domain is
+    batch_size // domains_per_batch, so unlike DomainDiverseBatchSampler it
+    grows with batch_size instead of being stuck at 1, the pairs get picked at
+    random every batch so training eventually sees all the combinations rather
+    than one fixed pair
 
-    As in DomainDiverseBatchSampler, smaller domains are oversampled because
-    exhausted domain buckets are reshuffled and reused; this is unavoidable
-    with any domain-balanced sampler on an imbalanced dataset like GWHD.
+    small domains still get oversampled here, same as the other one, you can't
+    really avoid that with domain balancing on something as lopsided as gwhd
     """
 
     def __init__(
@@ -203,7 +192,7 @@ class DomainCappedBatchSampler(Sampler[List[int]]):
         return self.num_batches
 
     def get_last_epoch_stats(self) -> List[dict]:
-        """Per-domain oversampling stats for the most recently completed epoch."""
+        """per domain oversampling stats for whatever epoch just finished"""
         group_sizes = {d: len(self.groups[d]) for d in self.domains}
         return _epoch_stats(self.domains, group_sizes, self._image_counts, self._refill_counts)
 
@@ -227,8 +216,8 @@ class DomainCappedBatchSampler(Sampler[List[int]]):
         for domain in self.domains:
             refill(domain)
 
-        # Split batch_size evenly across the chosen domains; any remainder
-        # (when batch_size doesn't divide evenly) goes to the first groups.
+        #split batch_size evenly over the chosen domains, leftovers go to the
+        #first groups when it doesn't divide cleanly
         base, remainder = divmod(self.batch_size, self.domains_per_batch)
 
         for _ in range(self.num_batches):
@@ -249,27 +238,21 @@ class DomainCappedBatchSampler(Sampler[List[int]]):
 
 
 class NaturalDomainBatchSampler(Sampler[List[int]]):
-    """
-    Batch sampler with no artificial control over domains per batch at all:
-    batches are ordinary random permutations of the full training set, the
-    same behaviour as the plain ``shuffle=True`` DataLoader used for the
-    non-DG baseline and for the original GRL script (DGOD/train_GWHD_dgfrcnn.py),
-    which does not do any domain-aware batching either.
+    """no domain control whatsoever, batches are just random shuffles of the
+    whole training set
 
-    Domain composition of a batch is left entirely to chance: large domains
-    (e.g. ETHZ_1 with 747 images) show up in most batches, tiny ones (e.g.
-    Arvalis_8 with 20 images) rarely do, and samples-per-domain scales
-    naturally with batch_size instead of being fixed. This is the closest
-    thing to "not fixing # of domains to batch size."
+    same thing a plain shuffle=True dataloader does, which is what the non-dg
+    baseline and the original grl script (train_GWHD_dgfrcnn.py) both use, what
+    lands in a batch is pure luck, so big domains like ethz_1 (747 images) turn
+    up constantly and tiny ones like arvalis_8 (20 images) almost never, and
+    samples-per-domain just scales with batch_size, this is the closest i get to
+    not pinning domains to batch size
 
-    The only safeguard added is a minimum of two distinct domains per batch:
-    FRCNNCoralLosses returns a zero CORAL loss whenever a batch is
-    single-domain (see FRCNNCoralLosses._alignment_or_zero), so a purely
-    unconstrained sampler would occasionally waste a training step's CORAL
-    signal. When ``ensure_min_domains=True`` (default), a single element of
-    an accidentally single-domain batch is swapped for a random sample from
-    a different domain. Set it to False to reproduce the baseline's batching
-    behaviour exactly, with no CORAL-specific guarantee at all.
+    only safeguard is two domains minimum per batch, because FRCNNCoralLosses
+    zeroes out the coral loss on a single-domain batch and i'd rather not throw
+    away the signal for that step, with ensure_min_domains on (the default) one
+    image in an all-one-domain batch gets swapped for a random one from
+    somewhere else, turn it off if you want the baseline's batching exactly
     """
 
     def __init__(
@@ -311,12 +294,11 @@ class NaturalDomainBatchSampler(Sampler[List[int]]):
         return self.num_batches
 
     def get_last_epoch_stats(self) -> List[dict]:
-        """
-        Per-domain draw stats for the most recently completed epoch. Unlike
-        the two domain-balanced samplers, there's no per-domain pool/refill
-        here -- "times_recycled" is reported as the single shared full-dataset
-        wraparound count (same for every domain, since it's one global
-        shuffled index list, not per-domain pools).
+        """per domain draw stats for whatever epoch just finished
+
+        no per-domain pools here unlike the other two samplers, so
+        times_recycled is just the one shared full-dataset wraparound count and
+        comes out the same for every domain
         """
         group_sizes = {d: len(self.by_domain[d]) for d in self.domains}
         refill_counts = {d: self._wraparound_count for d in self.domains}
@@ -335,8 +317,8 @@ class NaturalDomainBatchSampler(Sampler[List[int]]):
 
         for _ in range(self.num_batches):
             if cursor + self.batch_size > len(order):
-                # Wrap around with a fresh shuffle, same spirit as a new
-                # DataLoader epoch, so we never run out of data mid-batch.
+                #reshuffle and start over, basically a fresh dataloader epoch,
+                #so we never run dry halfway through a batch
                 order = list(range(self.n))
                 rng.shuffle(order)
                 cursor = 0

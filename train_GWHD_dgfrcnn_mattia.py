@@ -65,11 +65,9 @@ class WheatDataset(Dataset):
         self.domain_index = annotations["domain_index"] = annotations["domain"].map(
             unique_indices
         )
-        # Inverse of unique_indices, so evaluate_map() can resolve a
-        # per-domain result's integer domain_index back to the domain name
-        # (this dataset instance's mapping -- built independently per split,
-        # so only valid against domain_index values produced by this same
-        # WheatDataset instance).
+        #flip of unique_indices, lets evaluate_map turn a domain_index back
+        #into the actual domain name, built separately per split so it only
+        #lines up with indices that came out of this same dataset object
         self.domain_names = {index: value for value, index in unique_indices.items()}
 
         self.transform = transform
@@ -608,31 +606,24 @@ class DGFRCNN(LightningModule):
 
 
 def evaluate_map(detector, dataloader, device):
-    """
-    Evaluate global mAP on one complete dataset split, independent of the
-    Lightning training/validation loop. Gives a full map/map_50/map_75
-    breakdown and is used by the --eval_map post-training path so results
-    can be written to a per-run CSV -- same convention (and same CSV
-    schema) as train_GWHD_coralfrcnn.py's --eval_map path, so results from
-    any of the three training scripts are combinable with
-    summarize_eval_results.py.
+    """global map over one whole split, nothing to do with the lightning loop
 
-    Also computes a per-domain mAP@50 breakdown, printed here and returned
-    as a second value so the --eval_map caller can write it to its own CSV.
-    Unlike the per-domain tracking in this class's Lightning
-    validation_step/on_validation_epoch_end (self.per_domain_mAP, which
-    accumulates across every validation epoch of an entire training run and
-    is therefore not a clean single-split snapshot), the per-domain dict
-    here is local to a single call of this function, so it reflects exactly
-    one pass over `dataloader` -- e.g. one clean test-set evaluation of a
-    finished checkpoint via --eval_map.
+    gives the full map/map_50/map_75 breakdown and is what --eval_map runs after
+    training so the results go into a per run csv, same schema as
+    train_GWHD_coralfrcnn.py's --eval_map path so all three training scripts'
+    output works with summarize_eval_results.py
 
-    Returns (results, per_domain_rows) where results is the existing
-    map/map_50/map_75 dict and per_domain_rows is a list of
-    {"domain_index", "domain_name", "num_images", "map_50"} dicts, one per
-    domain present in `dataloader`. domain_name is resolved via
-    dataloader.dataset.domain_names (see WheatDataset.__init__) -- falls
-    back to the raw index (as a string) if that attribute is missing.
+    also does a per domain map@50 breakdown, printed here and handed back as a
+    second value, the per domain tracking in the lightning
+    validation_step/on_validation_epoch_end piles up across every validation
+    epoch of a whole run so it isn't a clean single split snapshot, whereas the
+    dict in here is local to one call and is exactly one pass over the dataloader
+
+    comes back as (results, per_domain_rows), results being the usual
+    map/map_50/map_75 dict and per_domain_rows a list of
+    {"domain_index", "domain_name", "num_images", "map_50"}, one per domain in
+    the dataloader, domain_name comes off dataloader.dataset.domain_names and
+    falls back to the raw index as a string if that isn't there
     """
     detector.eval()
     detector.to(device)
@@ -669,8 +660,8 @@ def evaluate_map(detector, dataloader, device):
 
         metric.update(predictions, targets)
 
-        # Per-domain breakdown (assumes batch_size=1, as used for the
-        # val/test dataloaders this function is called with).
+        #per domain breakdown, assumes batch_size=1 which is what the val
+        #and test dataloaders here use anyway
         try:
             per_domain_metric.update(predictions, targets)
             domain = batch[2][0].item()
@@ -877,11 +868,10 @@ if __name__ == "__main__":
         2, BATCH_SIZE, args.exp, args.reg_weights, args
     )  # Num classes + 1 and batch_size
 
-    # --eval_map: separate, post-training invocation (see run_repro_dgkarthik.sh)
-    # that loads the checkpoint this seed already trained and writes a results
-    # CSV -- kept out of the training path so each seed gets its own train log
-    # (this process's stdout) and its own test log (the --eval_map process's
-    # stdout) instead of one merged log file.
+    #--eval_map is a separate run after training (see run_repro_dgkarthik.sh)
+    #that loads the checkpoint this seed already trained and writes the results
+    #csv, keeping it out of the training path means each seed gets its own train
+    #log and its own test log instead of one merged file
     if args.eval_map:
         ckpt_path = os.path.join(NET_FOLDER, weights_file + ".ckpt")
         if not os.path.exists(ckpt_path):
@@ -929,22 +919,20 @@ if __name__ == "__main__":
     early_stop_callback = EarlyStopping(
         monitor="val_acc", min_delta=0.00, patience=10, verbose=False, mode="max"
     )
-    # save_last=True: writes NET_FOLDER/last.ckpt every epoch (in addition to the
-    # best-val_acc checkpoint under `weights_file`). This is what lets a run resume
-    # cleanly across multiple SLURM submissions when the partition's walltime cap
-    # (e.g. education = 2h) is shorter than a full training run.
+    #save_last=True drops a NET_FOLDER/last.ckpt every epoch on top of the
+    #best val_acc one under weights_file, that's what lets a run pick back up
+    #across several slurm submissions when the partition's walltime cap
+    #(education is 2h) is shorter than a full training run
     checkpoint_callback = ModelCheckpoint(
         monitor="val_acc", dirpath=NET_FOLDER, filename=weights_file, mode="max",
         save_last=True,
     )
-    # NOTE: dirpath (NET_FOLDER) is shared across all seeds of a repro run
-    # (run_repro_dgkarthik.sh passes the same --weights_folder for every
-    # seed, only --weights_file differs). save_last=True would otherwise
-    # write a single generic "last.ckpt" into that shared directory, so a
-    # later seed's auto-resume check below would find and resume from the
-    # *previous* seed's last checkpoint instead of starting fresh. Namespace
-    # the "last" checkpoint by weights_file to keep each seed's resume state
-    # isolated.
+    #dirpath (NET_FOLDER) is shared by every seed of a repro run, run_repro_dgkarthik.sh
+    #passes the same --weights_folder each time and only changes --weights_file
+    #with save_last=True that'd mean one generic last.ckpt sitting in a shared
+    #folder, and the auto-resume check below would happily pick up the previous
+    #seed's checkpoint instead of starting clean, so name the last checkpoint
+    #after weights_file and keep each seed's resume state to itself
     checkpoint_callback.CHECKPOINT_NAME_LAST = f"{weights_file}-last"
 
     trainer = Trainer(
@@ -956,14 +944,14 @@ if __name__ == "__main__":
         num_sanity_val_steps=2,
     )
 
-    # Resume from the last checkpoint if this is a re-submission of a run that
-    # got cut off by the walltime limit (full trainer state: weights, optimizer,
-    # LR scheduler, epoch count, early-stopping patience counter, and -- for this
-    # script -- the manual self.mode state machine, which lives on the LightningModule
-    # and is captured by the checkpoint like any other module attribute... actually
-    # it isn't (self.mode is a plain int, not a registered buffer), so a resumed run
-    # restarts its mode-cycle at 0 rather than wherever it left off. That's a minor
-    # inefficiency (repeats up to 3 extra sub-steps), not a correctness problem.
+    #if this is a resubmission of a run the walltime cut off, pick up from
+    #the last checkpoint, that restores the whole trainer state, weights,
+    #optimizer, lr scheduler, epoch count and the early stopping patience
+    #
+    #one thing it does not restore is self.mode, the manual mode state machine
+    #this script uses, because it's a plain int and not a registered buffer, so
+    #a resumed run starts its mode cycle back at 0, costs a few extra sub steps,
+    #doesn't break anything
     last_ckpt_path = os.path.join(NET_FOLDER, f"{weights_file}-last.ckpt")
     resume_from = last_ckpt_path if os.path.exists(last_ckpt_path) else None
     if resume_from:
@@ -978,13 +966,13 @@ if __name__ == "__main__":
         ckpt_path=resume_from,
     )
 
-    # Training ends here -- no inline post-fit validate/test. Run this same
-    # script again with --eval_map (see run_repro_dgkarthik.sh) to evaluate the
-    # checkpoint just written and get a results CSV; that gives each seed its
-    # own test log and CSV, separate from this training log. The .done
-    # sentinel is written by the shell wrapper once both steps succeed, not
-    # here, since "done" now means train+eval both completed.
+    #training stops here, no validate/test tacked on the end, run this script
+    #again with --eval_map (see run_repro_dgkarthik.sh) to score the checkpoint it just
+    #wrote and get the results csv, which keeps each seed's test log and csv
+    #separate from its training log, the .done sentinel gets written by the
+    #shell wrapper once both halves finish, not here, since done now means
+    #train and eval both went through
 
-    #  val_acc            0.5711795687675476 with batch size 4 - baseline-v11 - 38 epochs.
-    #  val_acc             0.622123122215271 with batch size 8 - baseline-v12 - 25 epochs.
-    #  val_acc          0.00018613977590575814 with batch size 1 - baseline-v13 - 10 epochs - lr = 1e-3.
+    #  val_acc            0.5711795687675476 with batch size 4 - baseline-v11 - 38 epochs
+    #  val_acc             0.622123122215271 with batch size 8 - baseline-v12 - 25 epochs
+    #  val_acc          0.00018613977590575814 with batch size 1 - baseline-v13 - 10 epochs - lr = 1e-3

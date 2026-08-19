@@ -1,60 +1,58 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Optional exploratory ablation: does rebalancing the CORAL branch weights
-# (alpha_1..5 in Eq. 2 of the thesis) toward equal per-branch influence
-# change anything, versus the current fixed weights?
+# optional exploratory ablation: does rebalancing the coral branch weights
+# (alpha_1..5 in equation 2 of the thesis) towards equal per branch influence
+# actually change anything, compared to the current fixed weights?
 #
-# Background (see writtenWork/coral_alpha_rebalance_experiment.md for the
-# full writeup): pulling and analysing the TensorBoard logs from all CORAL
-# training runs to date showed the five auxiliary branches sit at very
-# different raw magnitudes -- L_img ~1e-2, L_ins ~4e-4, L_cst ~3e-5,
-# L_ds_adv ~7e-4, L_ds_cls ~3e-4 (means across 22 alpha-tuned runs). Under
-# the CURRENT weights (0.5, 0.5, 0.5, 0.075, 0.0001), that magnitude gap
-# means L_img dominates the total auxiliary loss for most of training,
-# while L_ds_cls's weighted contribution is ~4-5 orders of magnitude
-# smaller than every other branch -- i.e. functionally zero, despite being
-# one of five nominal loss terms.
+# background, and writtenWork/coral_alpha_rebalance_experiment.md has the full
+# writeup: pulling the tensorboard logs from every coral run so far showed the
+# five auxiliary branches sitting at wildly different raw magnitudes, l_img
+# around 1e-2, l_ins around 4e-4, l_cst around 3e-5, l_ds_adv around 7e-4 and
+# l_ds_cls around 3e-4, averaged over 22 alpha tuned runs, with the current
+# weights (0.5, 0.5, 0.5, 0.075, 0.0001) that gap means l_img dominates the total
+# auxiliary loss for most of training, while l_ds_cls's weighted contribution
+# sits 4 to 5 orders of magnitude below every other branch, so it's doing
+# nothing at all despite being one of the five nominal loss terms
 #
-# This script does NOT do a real hyperparameter sweep (no time for that
-# before the deadline). It runs exactly TWO single-seed configs, same
-# sampler/batch-size/LR as the thesis's best-known CORAL config
-# (domain_diverse, batch_size=8, lr=1e-4, i.e. "diverse_bs8"), differing
-# ONLY in reg_weights:
+# this is not a real hyperparameter sweep, there's no time for one before the
+# deadline, it runs exactly two single seed configs on the same
+# sampler/batch size/lr as the thesis's best known coral config
+# (domain_diverse, batch_size=8, lr=1e-4, so "diverse_bs8"), and the only thing
+# that differs is reg_weights:
 #
-#   current    : 0.5 0.5 0.5 0.075  0.0001   <- what's in the thesis now
-#   rebalanced : 0.5 0.5 0.5 0.32   0.64     <- see derivation below
+#   current    : 0.5 0.5 0.5 0.075  0.0001   <- what's in the thesis right now
+#   rebalanced : 0.5 0.5 0.5 0.32   0.64     <- derivation below
 #
-# Rebalanced weights are derived by targeting each of L_ds_adv and
-# L_ds_cls's WEIGHTED contribution to match L_ins's current weighted
-# contribution (k = alpha2 * mean(raw_ins) ~= 2.19e-4 across the 22 tuned
-# runs), i.e. new_alpha_i = k / mean(raw_i):
-#   alpha_4 (ds_adv) = 2.19e-4 / 6.79e-4 ~= 0.32
-#   alpha_5 (ds_cls) = 2.19e-4 / 3.41e-4 ~= 0.64
-# alpha_1/2/3 (img/ins/cst) are left untouched -- deliberately scoped down
-# to just the two concept-shift branches the findings flagged as
-# underweighted, rather than also re-balancing img/ins/cst against each
-# other (a separate, less clear-cut question; see the markdown writeup).
+# the rebalanced weights come from making l_ds_adv and l_ds_cls's weighted
+# contributions match l_ins's current weighted contribution
+# (k = alpha2 * mean(raw_ins), about 2.19e-4 across the 22 tuned runs), so
+# new_alpha_i = k / mean(raw_i):
+#   alpha_4 (ds_adv) = 2.19e-4 / 6.79e-4, about 0.32
+#   alpha_5 (ds_cls) = 2.19e-4 / 3.41e-4, about 0.64
+# alpha_1/2/3 (img/ins/cst) are left alone deliberately, scoping this down to
+# just the two concept shift branches the findings flagged as underweighted
+# rather than also rebalancing img/ins/cst against each other, which is a
+# separate and much less clear cut question (again, see the markdown writeup)
 #
-# This is intentionally the SAME evidentiary bar as the existing sampler
-# ablation (single seed, small grid, explicitly reported as preliminary) --
-# not a claim of a tuned optimum.
+# this is on purpose held to the same evidentiary bar as the existing sampler
+# ablation, single seed, small grid, reported as preliminary, it is not a claim
+# of a tuned optimum
 #
-# Usage:
+# usage:
 #   ./run_coral_alpha_rebalance.sh [seed]
-# seed defaults to 42 (matches the historical diverse_bs8 result reported
-# in the thesis, so the "current" run here is a same-seed sanity check of
-# that number, not just a re-explanation of it).
+# seed defaults to 42, which matches the historical diverse_bs8 result in the
+# thesis, so the "current" run here doubles as a same seed sanity check on that
+# number rather than just re-explaining it
 #
-# Run inside tmux/screen so it survives an SSH disconnect:
+# run inside tmux or screen so an ssh drop doesn't kill it:
 #   tmux new -s coral_alpha
 #   bash run_coral_alpha_rebalance.sh
-#   # Ctrl-b d to detach; `tmux attach -t coral_alpha` to reattach later
+#   #ctrl-b d to detach, tmux attach -t coral_alpha to come back
 #
-# Cost: 2 runs at bs8/diverse_bs8, ~13-19 epochs each based on historical
-# runs of this exact config -- roughly the same wall-clock as 2 points in
-# the existing sampler ablation grid (a few hours total on a single GPU,
-# not an overnight job).
+# cost: 2 runs at diverse_bs8, 13 to 19 epochs each going off historical runs of
+# this exact config, so about the same wall clock as 2 points in the existing
+# sampler ablation grid, a few hours on one gpu, not an overnight job
 
 SEED="${1:-42}"
 ENV_NAME="DGOD"
@@ -70,7 +68,7 @@ else
 fi
 conda activate "${ENV_NAME}"
 
-# tag:reg_weights (space-separated, matches --reg_weights nargs=5)
+#tag:reg_weights, space separated to match --reg_weights nargs=5
 CONFIGS=(
   "current:0.5 0.5 0.5 0.075 0.0001"
   "rebalanced:0.5 0.5 0.5 0.32 0.64"

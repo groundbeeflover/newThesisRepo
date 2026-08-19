@@ -17,17 +17,16 @@ from .coral_core import (
 
 
 class FRCNNCoralLosses(nn.Module):
-    """
-    Five CORAL-style DG losses for the Faster R-CNN adaptation:
+    """the five coral losses that replace the grl heads
 
-      img     : image-level cross-domain alignment
-      ins     : instance-level cross-domain alignment
-      cst     : image/instance covariance consistency
-      ds_adv  : within-domain, across-class alignment
-      ds_cls  : within-class, across-domain alignment
+      img     : line up domains at image level
+      ins     : line up domains at instance level
+      cst     : keep image and instance covariances consistent
+      ds_adv  : same domain, line up the classes
+      ds_cls  : same class, line up the domains
 
-    The four alignment losses correspond to the four auxiliary GRL heads in
-    Seemakurthy et al.; cst is the separate image/instance consistency term.
+    the four alignment ones map onto the four grl heads in seemakurthy et al,
+    cst is the separate consistency term
     """
 
     def __init__(
@@ -66,12 +65,10 @@ class FRCNNCoralLosses(nn.Module):
 
     @staticmethod
     def _pre_cap_counts(domains: torch.Tensor) -> Dict[int, int]:
-        """Per-domain row counts *before* sample_rows() truncates to the cap.
+        """row counts per domain before sample_rows chops them down to the cap
 
-        Used to check whether max_spatial_samples_per_domain /
-        max_roi_samples_per_group are actually binding at a given
-        samples-per-domain batch composition, or whether a single image
-        already saturates them (see bs2-vs-bs8 sampling ablation notes).
+        lets me see whether the caps are actually doing anything at a given
+        batch composition or whether one image already blows past them
         """
         if domains.numel() == 0:
             return {}
@@ -94,12 +91,11 @@ class FRCNNCoralLosses(nn.Module):
         image_feature_map: torch.Tensor,
         image_domains: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Convert [B,C,H,W] into row-wise spatial samples [B*H*W,C].
+        """flatten [b,c,h,w] into rows of [b*h*w,c]
 
-        This keeps image-level CORAL usable with the paper batch size of 2:
-        covariance is estimated from spatial activation vectors pooled over all
-        images of each domain that are present in the minibatch.
+        this is what keeps image level coral working at the paper's batch size
+        of 2, the covariance comes from spatial activations pooled over every
+        image of a domain in the batch rather than from the 2 images themselves
         """
         if image_feature_map.ndim != 4:
             raise ValueError(
@@ -128,9 +124,8 @@ class FRCNNCoralLosses(nn.Module):
         roi_labels_by_image: List[torch.Tensor],
         image_domains: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Concatenate per-image ROI labels and repeat each image domain by its
-        actual number of sampled ROIs. No fixed 512-ROI assumption is made.
+        """glue the per image roi labels together and repeat each image's domain
+        by however many rois it actually got, no assuming it's always 512
         """
         if len(roi_labels_by_image) != image_domains.numel():
             raise ValueError(
@@ -208,12 +203,9 @@ class FRCNNCoralLosses(nn.Module):
         roi_labels_by_image: List[torch.Tensor],
         image_domains: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Args:
-            image_feature_map: [B, 256, H, W], e.g. FPN level '0'
-            roi_features: [sum_i N_i, 1024], box-head output
-            roi_labels_by_image: list of N_i ROI target-label tensors
-            image_domains: [B]
+        """takes the fpn level '0' map [b, 256, h, w], the box head output
+        [sum_i n_i, 1024], a list of roi label tensors per image, and the
+        domain of each image [b]
         """
         image_domains = image_domains.to(
             device=roi_features.device, dtype=torch.long
@@ -226,7 +218,7 @@ class FRCNNCoralLosses(nn.Module):
             roi_features, roi_labels_by_image, image_domains
         )
 
-        # Reused banks: each covariance is computed once.
+        #work these out once and reuse them, the losses below all share them
         image_domain_cov = self._domain_covariance_bank(
             image_x,
             image_d,
@@ -248,19 +240,20 @@ class FRCNNCoralLosses(nn.Module):
         )
         present_classes = sorted({c for (_, c) in conditional_cov.keys()})
 
-        # 1) Image-level domain adversarial -> cross-domain CORAL
+        #1) image level, was the domain adversarial head
         loss_img = self._alignment_or_zero(
             [image_domain_cov[d] for d in present_domains],
             image_x,
         )
 
-        # 2) Instance-level domain classification -> marginal ROI CORAL
+        #2) instance level, was the domain classification head
         loss_ins = self._alignment_or_zero(
             [roi_domain_cov[d] for d in present_domains],
             roi_x,
         )
 
-        # 3) Consistency: same-domain image/instance covariance geometry
+        #3) consistency, image and instance covariance should look the same
+        #   shape within a domain
         cst_terms = [
             normalized_covariance_distance(
                 image_domain_cov[d], roi_domain_cov[d]
@@ -273,8 +266,8 @@ class FRCNNCoralLosses(nn.Module):
             else zero_loss(roi_x)
         )
 
-        # 4) Domain-specific adversarial:
-        #    same domain, align different classes (GWHD: BG vs FG)
+        #4) domain specific adversarial, stay in one domain and line up the
+        #   classes against each other (for gwhd that's just background vs wheat)
         ds_adv_terms = []
         for d in present_domains:
             covs = [
@@ -291,8 +284,8 @@ class FRCNNCoralLosses(nn.Module):
             else zero_loss(roi_x)
         )
 
-        # 5) Domain-specific classification:
-        #    same class, align that class across domains
+        #5) domain specific classification, pick a class and line it up across
+        #   all the domains
         ds_cls_terms = []
         for c in present_classes:
             covs = [
@@ -309,12 +302,10 @@ class FRCNNCoralLosses(nn.Module):
             else zero_loss(roi_x)
         )
 
-        # Diagnostics for the bs2-vs-bs8 sampling ablation: pre-cap sample
-        # counts per domain, so it's possible to tell directly (instead of
-        # inferring) whether max_spatial_samples_per_domain /
-        # max_roi_samples_per_group are binding, and whether foreground ROI
-        # scarcity (not background) is the real limiter for ds_adv/ds_cls.
-        # roi_y == 1 is the foreground/wheat-head class; 0 is background.
+        #sample counts before the caps kick in, so i can tell whether the caps
+        #are actually binding and whether it's the foreground rois running out
+        #rather than background that limits ds_adv and ds_cls
+        #roi_y == 1 is wheat head, 0 is background
         fg_mask = roi_y == 1
         diag = {
             "num_domains_present": len(present_domains),

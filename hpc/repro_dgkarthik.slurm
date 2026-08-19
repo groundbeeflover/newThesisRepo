@@ -12,42 +12,41 @@
 #SBATCH --account=research
 #SBATCH --array=0-2
 
-# Reproduction of Seemakurthy et al.'s DGKarthik (GRL) number, using
-# train_GWHD_dgfrcnn_mattia.py (Mattia Dutto's script, fwd. by Petra Bosilj
-# 2026-08-12, patched here to run outside a notebook and to resolve its own
-# checkpoint path instead of a hardcoded "GWHD/" -- see git diff / hpc/README.md).
-# Settings per the email: BS=8 (hardcoded in the script itself), LR=1e-5,
-# alpha_4=0.055, seeds 0/1/2, fully deterministic.
-# Target from Mattia's runs: avg test mAP@0.5 ~= 60.3 (see hpc/README.md).
+# reproduction of seemakurthy et al's dgkarthik (grl) number using
+# train_GWHD_dgfrcnn_mattia.py, which is mattia dutto's script forwarded by petra
+# bosilj 2026-08-12, patched here so it runs outside a notebook and resolves its
+# own checkpoint path instead of a hardcoded "GWHD/" (see the git diff, or
+# hpc/README.md), settings per the email: bs=8, hardcoded in the script itself,
+# lr=1e-5, alpha_4=0.055, seeds 0/1/2, fully deterministic
+# target from mattia's runs is avg test map@0.5 around 60.3 (see hpc/README.md)
 #
-# reg_weights (a b c d e): only alpha_4 (d) was specified in the email as
-# "the only parameter of note" = 0.055. a/b/c/e are NOT confirmed by Mattia --
-# this uses this repo's existing convention (0.5 0.5 0.5 x 0.0001, see
-# run_gwhd_dg.sh) with only d swapped to 0.055. If Mattia confirms different
-# values for a/b/c/e, update REG_WEIGHTS below.
+# on reg_weights (a b c d e): the email only ever specified alpha_4 (d) as "the
+# only parameter of note" = 0.055, a/b/c/e are not confirmed by mattia, so this
+# uses this repo's existing convention, 0.5 0.5 0.5 x 0.0001 (see run_gwhd_dg.sh),
+# with only d swapped over, update REG_WEIGHTS below if mattia confirms different
+# values for the other four
 #
-# Array index 0/1/2 -> seed 0/1/2, one job per seed, run concurrently.
+# array index 0/1/2 maps to seed 0/1/2, one job each, all running at once
 #
-# Runs on the `research` partition (MaxTime=7-00:00:00 -- scontrol show
-# partition research), not `education` (MaxTime=02:00:00, and its
-# AllowAccounts=education excludes this account anyway -- see hpc/README.md
-# §6). 24h is a generous single-shot budget -- this run took 35-37 epochs in
-# earlier GRL attempts (grlbaselineruns/), which fit comfortably inside 24h
-# even at a few minutes/epoch.
+# runs on the research partition (MaxTime=7-00:00:00, check with scontrol show
+# partition research) rather than education (MaxTime=02:00:00, and its
+# AllowAccounts=education locks this account out anyway, see hpc/README.md
+# section 6), 24h is a generous one shot budget, this run took 35 to 37 epochs in
+# the earlier grl attempts in grlbaselineruns/, which fits inside 24h easily even
+# at a few minutes an epoch
 #
-# The training script still checkpoints every epoch and auto-resumes from
-# runs/.../checkpoints/last.ckpt if present, and still only writes
-# WEIGHTS_FILE.done once val/test eval genuinely finishes -- kept as a safety
-# net even though a 24h budget shouldn't need it. Resubmitting the same
-# command is always safe: resumes anything unfinished, skips anything
-# already .done.
+# the training script still checkpoints every epoch and picks back up from
+# runs/.../checkpoints/last.ckpt if it's there, and still only writes
+# WEIGHTS_FILE.done once val/test eval genuinely finishes, safety net, even
+# though 24h shouldn't need it, resubmitting the same command is always safe, it
+# resumes whatever's unfinished and skips whatever's already .done
 #
-# Usage: sbatch hpc/repro_dgkarthik.slurm [lr]
-#   lr defaults to 1e-5 (the setting with a known target number). Pass 1e-4
-#   to run the other row Mattia mentions exists in the sheet (Sheet3, rows
-#   3+5) -- no target number for that one has been shared yet.
-# If a task OOMs (L40s have 48GB, so unlikely, but PHYS_BATCH/ACCUM_STEPS are
-# here for parity with run_repro_dgkarthik.sh in case you move a seed there):
+# usage: sbatch hpc/repro_dgkarthik.slurm [lr]
+#   lr defaults to 1e-5, the one with a known target number, pass 1e-4 to run the
+#   other row mattia says is in the sheet (sheet3, rows 3+5), nobody's shared a
+#   target for that one yet
+# if a task ooms, and l40s have 48gb so it shouldn't, PHYS_BATCH/ACCUM_STEPS are
+# here to match run_repro_dgkarthik.sh in case you move a seed over there:
 # sbatch --export=ALL,PHYS_BATCH=4,ACCUM_STEPS=2 hpc/repro_dgkarthik.slurm
 set -euo pipefail
 
@@ -83,8 +82,8 @@ if [ -f "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.done" ]; then
   exit 0
 fi
 
-# NOTE: launched with srun so PyTorch Lightning's auto-detected SLURMEnvironment
-# plugin gets the handshake it expects (see hpc/README.md, section 4).
+#launched with srun so lightning's auto-detected slurm environment plugin
+#actually gets the handshake it wants (see hpc/README.md, section 4)
 srun python train_GWHD_dgfrcnn_mattia.py \
   --exp dg \
   --weights_folder "${RUN_DIR}/checkpoints" \
@@ -98,10 +97,10 @@ srun python train_GWHD_dgfrcnn_mattia.py \
   2>&1 | tee "${RUN_DIR}/logs/train_seed${SEED}.log"
 
 echo "=== dgkarthik seed ${SEED}: test evaluation ==="
-# Separate invocation, separate log: loads the checkpoint just trained and
-# writes ${WEIGHTS_FILE}_test_map.csv (map/map_50/map_75) into checkpoints/.
-# Mirrors run_repro_dgkarthik.sh's two-phase pattern -- without this second
-# call, no test log or results CSV is ever produced for this seed.
+#separate call, separate log, loads the checkpoint that just got trained and
+#writes ${WEIGHTS_FILE}_test_map.csv (map/map_50/map_75) into checkpoints/, the
+#same two phase thing run_repro_dgkarthik.sh does, without this second call this
+#seed never produces a test log or a results csv at all
 srun python train_GWHD_dgfrcnn_mattia.py \
   --exp dg \
   --weights_folder "${RUN_DIR}/checkpoints" \
@@ -110,6 +109,6 @@ srun python train_GWHD_dgfrcnn_mattia.py \
   --eval_split test \
   2>&1 | tee "${RUN_DIR}/logs/test_seed${SEED}.log"
 
-# Only mark this seed done once both training and eval have succeeded
-# (set -euo pipefail above means either failing exits the script first).
+#only mark the seed done once training and eval have both worked, set -euo
+#pipefail up top means either one failing kills the script before we get here
 touch "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.done"

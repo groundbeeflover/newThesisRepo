@@ -151,17 +151,13 @@ def collate_fn(batch):
     return images, targets, torch.tensor(domain_labels), orig_img
 
 def detection_accuracy(src_boxes, pred_boxes, iou_threshold=0.5):
-    """
-    Seemakurthy-style GWHD detection accuracy for one image:
-        TP / (TP + FP + FN)
+    """seemakurthy style gwhd detection accuracy for one image, tp / (tp + fp + fn)
 
-    This follows the old train_GWHD.py logic:
-    - match predicted boxes to ground truth boxes using IoU threshold
-    - count true positives, false positives, false negatives
-    - handle empty GT / empty prediction cases explicitly
+    same logic as the old train_GWHD.py, match preds to gt on iou, count tp/fp/fn
+    and deal with the empty gt and empty prediction cases on their own
     """
 
-    # Keep everything on CPU for evaluation simplicity
+    #keep it all on cpu, simpler for eval
     src_boxes = src_boxes.detach().cpu()
     pred_boxes = pred_boxes.detach().cpu()
 
@@ -199,7 +195,7 @@ def detection_accuracy(src_boxes, pred_boxes, iou_threshold=0.5):
             return torch.tensor(1.0)
 
     else:
-        # total_gt > 0 and total_pred == 0
+        #there were gt boxes but we predicted nothing
         return torch.tensor(0.0)
 
 class GRLayer(Function):
@@ -409,8 +405,8 @@ class DGFRCNN(LightningModule):
 
           IDA_out = self.InsDA(self.box_features)
 
-          # Each image can contribute a different number of RoI features.
-          # Do not assume IDA_out.shape[0] is divisible by batch size.
+          #each image gives a different number of roi features, so don't
+          #assume IDA_out.shape[0] divides by the batch size
           roi_counts = [labels_per_img.numel() for labels_per_img in self.box_labels]
 
           ins_labels = torch.cat([
@@ -581,7 +577,7 @@ class DGFRCNN(LightningModule):
     
     def validation_step(self, batch, batch_idx):
 
-      # Skip sanity-check metrics so they do not pollute epoch-level validation logs.
+      #skip the sanity check metrics, they mess up the epoch level val logs
       if self.trainer.sanity_checking:
         return
 
@@ -597,11 +593,11 @@ class DGFRCNN(LightningModule):
         targets.append(target)
 
       try:
-        # Global validation mAP across the whole validation set.
+        #global val map over the whole validation set
         self.metric.update(preds, targets)
 
-        # Proper per-domain mAP: accumulate all images in each domain,
-        # compute once at epoch end.
+        #per domain map done properly, collect every image in a domain and
+        #only compute at the end of the epoch
         for pred, target, domain in zip(preds, targets, domain_labels):
           domain_id = int(domain.item())
 
@@ -711,13 +707,10 @@ def parser_args():
 
 @torch.no_grad()
 def evaluate_wada(detector, dataloader, output_dir, score_threshold=0.5, iou_threshold=0.5, max_batches=None):
-    """
-    Evaluate a trained detector using a WADA/ADA-style metric on a dataloader.
+    """runs a wada/ada style metric over a dataloader
 
-    Returns:
-        domain_scores: dict[int, float]
-        wada: unweighted mean of per-domain accuracy values
-        global_accuracy: mean over all images, not domain-balanced
+    hands back the per domain scores, wada (plain mean of those) and
+    global_accuracy (mean over every image, not domain balanced)
     """
 
     detector.eval()
@@ -736,7 +729,7 @@ def evaluate_wada(detector, dataloader, output_dir, score_threshold=0.5, iou_thr
         
       images, boxes_list, domain_labels, orig_imgs = data_sample
 
-        # Dataloader batch size should be 1 for WADA evaluation
+        #wada eval wants a dataloader batch size of 1
       images = images.to(device)
 
       preds = detector(images)
@@ -773,10 +766,10 @@ def evaluate_wada(detector, dataloader, output_dir, score_threshold=0.5, iou_thr
     if len(domain_df) == 0:
         raise RuntimeError("No domain scores were computed. Check the dataloader/test set.")
 
-    # This is the domain-balanced score: mean of per-domain means.
+    #domain balanced score, the mean of the per domain means
     wada = float(domain_df["domain_accuracy"].mean())
 
-    # This is the image-balanced score: mean over every image.
+    #image balanced score, just the mean over every image
     global_accuracy = float(torch.stack(all_image_scores).mean().item())
 
     domain_df.to_csv(output_dir / "wada_per_domain.csv", index=False)
@@ -855,7 +848,7 @@ if __name__ == '__main__':
 
   # Instantiating the detector
   detector = DGFRCNN(2, args.batch_size, args.exp, args.reg_weights)
-    # WADA/ADA-style evaluation mode
+    #wada/ada style eval mode
   if args.eval_wada:
     ckpt_path = os.path.join(NET_FOLDER, weights_file + '.ckpt')
 

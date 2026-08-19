@@ -1,61 +1,55 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# RunPod: nondeterministic CORAL runs for the two sampler configs of
-# interest -- domcap2_bs8 (domain_capped, K=2) and diverse_bs8
-# (domain_diverse). Same conda-detection convention as
-# run_gwhd_baseline.sh / run_gwhd_dg.sh.
+# runpod, nondeterministic coral runs for the two sampler configs i care about,
+# domcap2_bs8 (domain_capped, k=2) and diverse_bs8 (domain_diverse)
 #
-# NOTE: this replaces the old generic
+# this replaces the old generic
 # `run_gwhd_coral.sh <tag> <sampler> <batch_size> <domains_per_batch> [lr] [wada]`
-# interface (used by run_coral_sampler_ablation.sh for its full 5-point
-# bs2/bs8 grid). That grid is not reproduced here -- only the two bs8 configs
-# below. If the ablation script's other points (capped2_bs2, natural_bs8,
-# etc.) are still needed, they'll need their own runner.
+# interface that run_coral_sampler_ablation.sh used for its full 5 point bs2/bs8
+# grid, that grid isn't reproduced here, only the two bs8 configs below, so if
+# the ablation script's other points (capped2_bs2, natural_bs8 and so on) are
+# needed again they'll want their own runner
 #
-# Ablation-style: each sampler config is run under two separate (LR,
-# reg_weights) presets, each its own run directory, each run for 3
-# nondeterministic rounds:
-#   lr1e-4_reg075  -- LR=1e-4, reg_weights 0.5 0.5 0.5 0.075 0.0001
-#   lr1e-5_reg055  -- LR=1e-5, reg_weights 0.5 0.5 0.5 0.055 0.0001
-#                     (matches run_repro_coral.sh's alignment with the
-#                     baseline/dgkarthik deterministic repros)
-# Only alpha_4 (the 4th reg weight) differs between presets; a/b/c/e keep
-# this repo's existing 0.5/0.5/0.5/0.0001 convention in both.
+# each sampler config runs under two (lr, reg_weights) presets, each with its own
+# run directory, each run 3 times:
+#   lr1e-4_reg075  -- lr=1e-4, reg_weights 0.5 0.5 0.5 0.075 0.0001
+#   lr1e-5_reg055  -- lr=1e-5, reg_weights 0.5 0.5 0.5 0.055 0.0001, which lines
+#                     up with run_repro_coral.sh and the baseline/dgkarthik
+#                     deterministic repros
+# only alpha_4, the 4th one, changes between the presets, a/b/c/e stay on this
+# repo's usual 0.5/0.5/0.5/0.0001 in both
 #
-# 2 configs x 2 presets = 4 run directories, 3 rounds each = 12 full
-# train+eval passes total.
+# 2 configs x 2 presets = 4 run directories, 3 rounds each, so 12 full train+eval
+# passes
 #
-# Each round is nondeterministic (cudnn.benchmark on, no --deterministic --
-# the training script defaults to this when --deterministic is omitted).
-# Nondeterministic mode doesn't need the PHYS_BATCH/ACCUM_STEPS split that
-# the deterministic repro (run_repro_coral.sh) needs to fit BS=8 in memory,
-# so batch_size=8 is passed straight through as a single physical batch.
+# every round is nondeterministic, cudnn.benchmark on and no --deterministic,
+# which is the training script's default, so no need for the
+# PHYS_BATCH/ACCUM_STEPS split the deterministic repro (run_repro_coral.sh) needs
+# to fit bs=8 in memory, batch_size=8 goes through as one real batch
 #
-# Each round still gets a distinct --seed (0/1/2) so weight init, data
-# order, and the domain-diverse/domain-capped sampler draw all vary too, not
-# just conv-algorithm selection -- gives 3 genuinely independent trials per
-# (config, preset).
+# each round still gets its own --seed (0/1/2) so weight init, data order and the
+# sampler draw all move around, not just conv algorithm choice, making them 3
+# properly independent trials per (config, preset)
 #
-# Configs x presets x rounds run SEQUENTIALLY (single RunPod GPU). Not
-# detached: run inside tmux/screen so it survives an SSH disconnect:
+# configs x presets x rounds run one after the other, single runpod gpu, nothing
+# detaches this, run it in tmux or screen so an ssh drop doesn't kill it:
 #   tmux new -s gwhd_coral
 #   bash run_gwhd_coral.sh
-#   # Ctrl-b d to detach; `tmux attach -t gwhd_coral` to reattach later
+#   #ctrl-b d to detach, tmux attach -t gwhd_coral to come back
 #
-# Safe to re-run / resume: each (config, preset, round) triple is skipped if
-# its .done sentinel already exists.
+# fine to re-run, any (config, preset, round) with a .done sentinel gets skipped
 
 ENV_NAME="DGOD"
 ROUNDS=(0 1 2)
 
-# tag:sampler:domains_per_batch
+#tag:sampler:domains_per_batch
 CONFIGS=(
   "domcap2_bs8:domain_capped:2"
   "diverse_bs8:domain_diverse:8"
 )
 
-# tag:lr:alpha4  (reg_weights = 0.5 0.5 0.5 <alpha4> 0.0001)
+#tag:lr:alpha4, reg_weights ends up 0.5 0.5 0.5 <alpha4> 0.0001
 HP_PRESETS=(
   "lr1e-4_reg075:1e-4:0.075"
   "lr1e-5_reg055:1e-5:0.055"
@@ -63,7 +57,8 @@ HP_PRESETS=(
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# Prefer persistent conda if installed in /workspace; fall back to ~/miniconda3.
+#use the conda in /workspace if it's there, it survives a pod restart,
+#otherwise fall back to the one in home
 if [ -f /workspace/miniconda3/etc/profile.d/conda.sh ]; then
   source /workspace/miniconda3/etc/profile.d/conda.sh
 else
@@ -105,7 +100,7 @@ for CONFIG in "${CONFIGS[@]}"; do
       fi
 
       echo "=== coral ${TAG} round ${ROUND}: training ==="
-      # Own checkpoint + own training log per (config, preset, round).
+      #its own checkpoint and its own training log per (config, preset, round)
       python train_GWHD_coralfrcnn.py \
         --exp coral \
         --weights_folder "${CKPT_DIR}" \
@@ -121,8 +116,8 @@ for CONFIG in "${CONFIGS[@]}"; do
         2>&1 | tee "${RUN_DIR}/logs/train_round${ROUND}.log"
 
       echo "=== coral ${TAG} round ${ROUND}: test evaluation ==="
-      # Own test log + own test-results csv per (config, preset, round)
-      # (${WEIGHTS_FILE}_test_map.csv, written into checkpoints/).
+      #its own test log and its own test results csv per (config, preset,
+      #round), that's ${WEIGHTS_FILE}_test_map.csv, dropped into checkpoints/
       python train_GWHD_coralfrcnn.py \
         --exp coral \
         --weights_folder "${CKPT_DIR}" \

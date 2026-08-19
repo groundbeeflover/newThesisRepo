@@ -12,33 +12,33 @@
 #SBATCH --account=research
 #SBATCH --array=0-2
 
-# Reproduction of Seemakurthy et al.'s baseline number, using the clean/stock
-# torchvision Faster R-CNN in train_GWHD_baseline_clean.py (NOT the repo's
-# custom fasterrcnn.py/non_dg path) -- per Mattia Dutto's email, fwd. by
-# Petra Bosilj, 2026-08-12: BS=8, LR=1e-5, seeds 0/1/2, fully deterministic.
-# Target from Mattia's runs: avg test mAP@0.5 ~= 54.7 (see hpc/README.md).
+# reproduction of seemakurthy et al's baseline number using the clean stock
+# torchvision faster r-cnn in train_GWHD_baseline_clean.py, NOT the repo's own
+# fasterrcnn.py/non_dg path, going off mattia dutto's email, forwarded by petra
+# bosilj 2026-08-12: bs=8, lr=1e-5, seeds 0/1/2, fully deterministic
+# target from mattia's runs is avg test map@0.5 around 54.7 (see hpc/README.md)
 #
-# Array index 0/1/2 -> seed 0/1/2, one job per seed, run concurrently.
+# array index 0/1/2 maps to seed 0/1/2, one job each, all running at once
 #
-# Runs on the `research` partition (MaxTime=7-00:00:00 -- scontrol show
-# partition research), not `education` (MaxTime=02:00:00, and its
-# AllowAccounts=education excludes this account anyway -- see hpc/README.md
-# §6). 24h is a generous single-shot budget for 100 epochs/patience-10 early
-# stopping; the earlier grlbaselineruns baseline converged in 13-23 epochs.
+# runs on the research partition (MaxTime=7-00:00:00, check with scontrol show
+# partition research) rather than education (MaxTime=02:00:00, and its
+# AllowAccounts=education locks this account out anyway, see hpc/README.md
+# section 6), 24h is a generous one shot budget for 100 epochs with patience 10
+# early stopping, the earlier grlbaselineruns baseline converged in 13 to 23
 #
-# The training script still checkpoints every epoch and auto-resumes from
-# runs/.../checkpoints/last.ckpt if present, and still only writes
-# WEIGHTS_FILE.done once val/test eval genuinely finishes -- kept as a safety
-# net (job gets killed, node reboots, you hit a real per-job time limit later)
-# even though a 24h budget shouldn't need it. Resubmitting the same command is
-# always safe: resumes anything unfinished, skips anything already .done.
+# the training script still checkpoints every epoch and picks back up from
+# runs/.../checkpoints/last.ckpt if it's there, and still only writes
+# WEIGHTS_FILE.done once val/test eval genuinely finishes, that's a safety net
+# for a job getting killed, a node rebooting, or hitting a real time limit later
+# on, even though 24h shouldn't need it, resubmitting the same command is always
+# safe, it resumes whatever's unfinished and skips whatever's already .done
 #
-# Usage: sbatch hpc/repro_baseline.slurm [lr]
-#   lr defaults to 1e-5 (the setting with a known target number). Pass 1e-4
-#   to run the other row Mattia mentions exists in the sheet (Sheet3, rows
-#   3+5) -- no target number for that one has been shared yet.
-# If a task OOMs (L40s have 48GB, so unlikely, but PHYS_BATCH/ACCUM_STEPS are
-# here for parity with run_repro_baseline.sh in case you move a seed there):
+# usage: sbatch hpc/repro_baseline.slurm [lr]
+#   lr defaults to 1e-5, the one with a known target number, pass 1e-4 to run the
+#   other row mattia says is in the sheet (sheet3, rows 3+5), nobody's shared a
+#   target for that one yet
+# if a task ooms, and l40s have 48gb so it shouldn't, PHYS_BATCH/ACCUM_STEPS are
+# here to match run_repro_baseline.sh in case you move a seed over there:
 # sbatch --export=ALL,PHYS_BATCH=4,ACCUM_STEPS=2 hpc/repro_baseline.slurm
 set -euo pipefail
 
@@ -73,8 +73,8 @@ if [ -f "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.done" ]; then
   exit 0
 fi
 
-# NOTE: launched with srun so PyTorch Lightning's auto-detected SLURMEnvironment
-# plugin gets the handshake it expects (see hpc/README.md, section 4).
+#launched with srun so lightning's auto-detected slurm environment plugin
+#actually gets the handshake it wants (see hpc/README.md, section 4)
 srun python train_GWHD_baseline_clean.py \
   --weights_folder "${RUN_DIR}/checkpoints" \
   --weights_file "${WEIGHTS_FILE}" \

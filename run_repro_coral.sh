@@ -1,54 +1,52 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# RunPod deterministic CORAL reproduction run, sibling to run_repro_baseline.sh /
-# run_repro_dgkarthik.sh -- runs train_GWHD_coralfrcnn.py --exp coral for
-# seeds 0, 1, 2 with --deterministic set. Same conda-detection convention and
-# the same runs/gwhd_repro_coral_lr<LR>/ layout as the other two, so results
-# are drop-in comparable / summarizable the same way.
+# runpod deterministic coral reproduction, sibling of run_repro_baseline.sh and
+# run_repro_dgkarthik.sh, runs train_GWHD_coralfrcnn.py --exp coral for seeds
+# 0, 1 and 2 with --deterministic on, same runs/gwhd_repro_coral_lr<LR>/ layout
+# as the other two so everything summarizes the same way
 #
-# BS=8, LR=1e-5, reg_weights 0.5 0.5 0.5 0.075 0.0001 (this repo's existing
-# CORAL convention -- see run_gwhd_coral.sh / hpc/train_coral.slurm; only
-# dgkarthik's alpha_4=0.055 is a value Mattia actually confirmed), sampler
-# domain_diverse (the original algorithm), fully deterministic.
+# bs=8, lr=1e-5, reg_weights 0.5 0.5 0.5 0.075 0.0001, this repo's usual coral
+# convention (see run_gwhd_coral.sh and hpc/train_coral.slurm, the only value
+# mattia actually confirmed is dgkarthik's alpha_4=0.055), sampler
+# domain_diverse which is the original algorithm, fully deterministic
 #
-# Seeds run SEQUENTIALLY by default, not concurrently -- a single RunPod GPU
-# may not have headroom for 3 concurrent BS=8 CORAL trainings at once.
+# seeds run one after the other by default rather than at the same time, a single
+# runpod gpu probably can't hold 3 concurrent bs=8 coral trainings
 #
-# IMPORTANT: unlike sbatch on the cluster, nothing here detaches this from
-# your terminal -- it's a plain foreground bash process. Run it inside
-# tmux/screen (or nohup) so it survives an SSH disconnect:
+# unlike sbatch on the cluster nothing here detaches from your terminal, it's
+# just a foreground bash process, run it in tmux or screen (or nohup) so an ssh
+# drop doesn't kill it:
 #   tmux new -s repro_coral
 #   bash run_repro_coral.sh
-#   # Ctrl-b d to detach; `tmux attach -t repro_coral` to reattach later
+#   #ctrl-b d to detach, tmux attach -t repro_coral to come back
 #
-# Usage: bash run_repro_coral.sh [lr]
-#   lr defaults to 1e-5, matching the baseline/dgkarthik deterministic repros.
+# usage: bash run_repro_coral.sh [lr]
+#   lr defaults to 1e-5, matching the baseline and dgkarthik deterministic repros
 #
-# If you hit `torch.OutOfMemoryError`: deterministic CORAL at BS=8 is even
-# tighter than the plain baseline at the same batch size -- cudnn.deterministic
-# disables the fastest conv algorithms, and torch.use_deterministic_algorithms
-# forces slower, more memory-hungry deterministic kernels for some ops. Same
-# two independent levers as run_repro_baseline.sh / run_repro_dgkarthik.sh,
-# both settable via env vars without editing this file:
+# if you get torch.OutOfMemoryError, deterministic coral at bs=8 is tighter again
+# than the plain baseline at the same batch size, cudnn.deterministic takes the
+# fastest conv algorithms off the table and torch.use_deterministic_algorithms
+# forces slower more memory hungry kernels for some ops, same two levers as the
+# other two repro scripts, both env vars so you don't have to edit this file:
 #
-#   PHYS_BATCH / ACCUM_STEPS -- split the effective BS=8 into smaller physical
-#   steps accumulated together (e.g. PHYS_BATCH=4 ACCUM_STEPS=2 = effective 8,
-#   half the peak memory). Keep PHYS_BATCH * ACCUM_STEPS = 8 to preserve the
-#   reproduction's effective batch size. Default PHYS_BATCH=8 ACCUM_STEPS=1 is
-#   unchanged behavior. Note: for --sampler domain_diverse (the default here),
-#   this also shrinks the number of distinct domains guaranteed per physical
-#   batch to PHYS_BATCH -- same caveat as BatchNorm statistics being computed
-#   per physical step, not per effective batch (see --help in
-#   train_GWHD_coralfrcnn.py).
+#   PHYS_BATCH / ACCUM_STEPS splits the effective bs=8 into smaller physical
+#   steps that get accumulated, so PHYS_BATCH=4 ACCUM_STEPS=2 is still an
+#   effective 8 at half the peak memory, keep PHYS_BATCH * ACCUM_STEPS = 8 or the
+#   reproduction's effective batch size changes, the default PHYS_BATCH=8
+#   ACCUM_STEPS=1 is just the normal behaviour, worth knowing that with
+#   --sampler domain_diverse, the default here, this also drops the number of
+#   distinct domains guaranteed per physical batch down to PHYS_BATCH, same kind
+#   of caveat as batchnorm stats being computed per physical step rather than per
+#   effective batch (see --help in train_GWHD_coralfrcnn.py)
 #
-#   Example: PHYS_BATCH=4 ACCUM_STEPS=2 bash run_repro_coral.sh
+#   example: PHYS_BATCH=4 ACCUM_STEPS=2 bash run_repro_coral.sh
 #
-# The PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True set below is a free,
-# semantics-preserving fix for memory *fragmentation* specifically (look for
-# "reserved but unallocated" in the OOM error -- if that number is large, this
-# is the fix; if it's the PHYS_BATCH that's actually too big, it won't help on
-# its own, use PHYS_BATCH/ACCUM_STEPS above too).
+# the PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True set below is a free fix
+# for memory fragmentation specifically, look for "reserved but unallocated" in
+# the oom message, if that number is big this is what you want, if the physical
+# batch is just too big it won't save you on its own, use PHYS_BATCH/ACCUM_STEPS
+# as well
 
 LR="${1:-1e-5}"
 ENV_NAME="DGOD"
@@ -65,7 +63,8 @@ RUN_DIR="runs/${RUN_NAME}"
 echo "Starting CORAL reproduction (lr=${LR}, reg_weights=${REG_WEIGHTS[*]}), seeds: ${SEEDS[*]}"
 echo "Physical batch=${PHYS_BATCH}, accumulate_grad_batches=${ACCUM_STEPS} (effective batch=$((PHYS_BATCH * ACCUM_STEPS)))"
 
-# Prefer persistent conda if installed in /workspace; fall back to ~/miniconda3.
+#use the conda in /workspace if it's there, it survives a pod restart,
+#otherwise fall back to the one in home
 if [ -f /workspace/miniconda3/etc/profile.d/conda.sh ]; then
   source /workspace/miniconda3/etc/profile.d/conda.sh
 else
@@ -92,10 +91,10 @@ for SEED in "${SEEDS[@]}"; do
   fi
 
   echo "=== coral seed ${SEED}: training ==="
-  # NOTE: train_GWHD_coralfrcnn.py checkpoints every epoch and auto-resumes
-  # from <weights_file>-last.ckpt if this seed was interrupted (e.g. a
-  # spot/interruptible pod got reclaimed) -- rerunning this script is always
-  # safe. Training-only: writes its own log and its own checkpoint.
+  #train_GWHD_coralfrcnn.py checkpoints every epoch and picks back up from
+  #<weights_file>-last.ckpt if this seed got interrupted, say a spot pod got
+  #reclaimed, so re-running this script is always safe, this call only trains,
+  #it writes its own log and its own checkpoint
   python train_GWHD_coralfrcnn.py \
     --exp coral \
     --weights_folder "${RUN_DIR}/checkpoints" \
@@ -111,11 +110,11 @@ for SEED in "${SEEDS[@]}"; do
     2>&1 | tee "${RUN_DIR}/logs/train_seed${SEED}.log"
 
   echo "=== coral seed ${SEED}: test evaluation ==="
-  # Separate invocation, separate log: loads the checkpoint just trained and
-  # writes ${WEIGHTS_FILE}_test_map.csv (map/map_50/map_75) into checkpoints/.
-  # (train_GWHD_coralfrcnn.py already had --eval_map support; this script
-  # just wasn't calling it before, so no test log or results CSV was ever
-  # produced for CORAL repro runs.)
+  #separate call, separate log, loads the checkpoint that just got trained and
+  #writes ${WEIGHTS_FILE}_test_map.csv (map/map_50/map_75) into checkpoints/
+  #train_GWHD_coralfrcnn.py already supported --eval_map, this script just
+  #wasn't calling it, which is why coral repro runs never produced a test log or
+  #a results csv
   python train_GWHD_coralfrcnn.py \
     --exp coral \
     --weights_folder "${RUN_DIR}/checkpoints" \
@@ -124,21 +123,21 @@ for SEED in "${SEEDS[@]}"; do
     --eval_split test \
     2>&1 | tee "${RUN_DIR}/logs/test_seed${SEED}.log"
 
-  # Only mark this seed done once both training and eval have succeeded
-  # (set -euo pipefail above means either failing exits the script first).
-  # train_GWHD_coralfrcnn.py doesn't write a WEIGHTS_FILE.done sentinel itself
-  # (unlike train_GWHD_baseline_clean.py / train_GWHD_dgfrcnn_mattia.py) --
-  # write one here so the skip-if-done check above works the same way.
+  #only mark the seed done once training and eval have both worked, set -euo
+  #pipefail up top means either one failing kills the script before we get here
+  #train_GWHD_coralfrcnn.py doesn't write its own WEIGHTS_FILE.done sentinel the
+  #way the baseline and mattia scripts do, so write one here and the
+  #skip-if-done check above behaves the same
   touch "${RUN_DIR}/checkpoints/${WEIGHTS_FILE}.done"
 done
 
 echo "Done (or already were). Check ${RUN_DIR}/checkpoints/*.done to confirm which seeds finished."
 echo "Per-seed results: ${RUN_DIR}/checkpoints/coral_seed*_test_map.csv"
 
-# --- Optional: run all 3 seeds in parallel instead of sequentially --------
-# Only do this if you've confirmed your GPU has enough free VRAM for 3x the
-# per-process footprint, and reduce --num_workers per process (e.g. to 5) so
-# you don't oversubscribe the pod's vCPUs across all three at once.
+# --- optional, run all 3 seeds at once instead of one after the other ------
+# only bother if you've actually checked the gpu has 3x the per process vram
+# free, and drop --num_workers per process (5 or so) so three of them don't
+# fight over the pod's vcpus
 #
 # for SEED in "${SEEDS[@]}"; do
 #   WEIGHTS_FILE="coral_seed${SEED}"

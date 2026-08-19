@@ -1,43 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# RunPod: nondeterministic reproduction of Mattia's "pure" baseline --
-# train_GWHD_baseline_clean.py, stock torchvision Faster R-CNN (no DA heads,
-# no fasterrcnn.py wrapper, hence no --reg_weights -- there's no DA loss to
-# weight). Same conda-detection convention as run_gwhd_dg.sh /
-# run_gwhd_coral.sh.
+# runpod, nondeterministic version of mattia's pure baseline, so
+# train_GWHD_baseline_clean.py, stock torchvision faster r-cnn, no da heads and
+# no fasterrcnn.py wrapper, which is why there's no --reg_weights here, there's
+# no da loss to weight in the first place
 #
-# Ablation-style: two separate LR presets, each its own run directory, each
-# run for 3 nondeterministic rounds:
-#   lr1e-4  -- LR=1e-4
-#   lr1e-5  -- LR=1e-5 (Mattia's setting, target avg test mAP@0.5 ~= 54.7)
+# two lr presets, each with its own run directory, each run 3 times:
+#   lr1e-4  -- lr=1e-4
+#   lr1e-5  -- lr=1e-5, mattia's setting, target avg test map@0.5 around 54.7
 #
-# Each round is nondeterministic (cudnn.benchmark on, no --deterministic --
-# the training script defaults to this when --deterministic is omitted).
-# Nondeterministic mode doesn't need the PHYS_BATCH/ACCUM_STEPS split that
-# the deterministic repro (run_repro_baseline.sh) needs to fit BS=8 in
-# memory, since cudnn.benchmark picks the fastest-fitting conv algorithms
-# instead of forcing the slower/memory-hungrier deterministic ones -- so
-# batch_size=8 is passed straight through as a single physical batch.
+# every round is nondeterministic, cudnn.benchmark on and no --deterministic,
+# which is what the training script does by default, that means i don't need the
+# PHYS_BATCH/ACCUM_STEPS split the deterministic repro (run_repro_baseline.sh)
+# needs to squeeze bs=8 into memory, since cudnn.benchmark picks whichever conv
+# algorithms actually fit instead of being forced onto the slow memory hungry
+# deterministic ones, so batch_size=8 goes straight through as one real batch
 #
-# Each round still gets a distinct --seed (0/1/2) so weight init and data
-# order vary too, not just conv-algorithm selection -- gives 3 genuinely
-# independent trials per preset.
+# each round still gets its own --seed (0/1/2) so weight init and data order move
+# around too, not just which conv algorithm got picked, which makes them 3
+# properly independent trials per preset
 #
-# Presets x rounds run SEQUENTIALLY (single RunPod GPU) -- 6 full
-# train+eval passes total. Not detached: run inside tmux/screen so it
-# survives an SSH disconnect:
+# presets x rounds run one after the other since it's a single runpod gpu, so 6
+# full train+eval passes, nothing detaches this, run it in tmux or screen so an
+# ssh drop doesn't kill it:
 #   tmux new -s gwhd_baseline
 #   bash run_gwhd_baseline.sh
-#   # Ctrl-b d to detach; `tmux attach -t gwhd_baseline` to reattach later
+#   #ctrl-b d to detach, tmux attach -t gwhd_baseline to come back
 #
-# Safe to re-run / resume: each (preset, round) pair is skipped if its
-# .done sentinel already exists.
+# fine to re-run, any (preset, round) with a .done sentinel gets skipped
 
 ENV_NAME="DGOD"
 ROUNDS=(0 1 2)
 
-# tag:lr
+#tag:lr
 HP_PRESETS=(
   "lr1e-4:1e-4"
   "lr1e-5:1e-5"
@@ -45,7 +41,8 @@ HP_PRESETS=(
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# Prefer persistent conda if installed in /workspace; fall back to ~/miniconda3.
+#use the conda in /workspace if it's there, it survives a pod restart,
+#otherwise fall back to the one in home
 if [ -f /workspace/miniconda3/etc/profile.d/conda.sh ]; then
   source /workspace/miniconda3/etc/profile.d/conda.sh
 else
@@ -80,7 +77,7 @@ for PRESET in "${HP_PRESETS[@]}"; do
     fi
 
     echo "=== pure baseline ${TAG} round ${ROUND}: training ==="
-    # Own checkpoint + own training log per (preset, round).
+    #its own checkpoint and its own training log per (preset, round)
     python train_GWHD_baseline_clean.py \
       --weights_folder "${RUN_DIR}/checkpoints" \
       --weights_file "${WEIGHTS_FILE}" \
@@ -92,8 +89,8 @@ for PRESET in "${HP_PRESETS[@]}"; do
       2>&1 | tee "${RUN_DIR}/logs/train_round${ROUND}.log"
 
     echo "=== pure baseline ${TAG} round ${ROUND}: test evaluation ==="
-    # Own test log + own test-results csv per (preset, round)
-    # (${WEIGHTS_FILE}_test_map.csv, written into checkpoints/).
+    #its own test log and its own test results csv per (preset, round),
+    #that's ${WEIGHTS_FILE}_test_map.csv, dropped into checkpoints/
     python train_GWHD_baseline_clean.py \
       --weights_folder "${RUN_DIR}/checkpoints" \
       --weights_file "${WEIGHTS_FILE}" \
