@@ -1,11 +1,18 @@
 #!/usr/bin/env bash
-# runpod. same idea as rerun_tests_nondet_lr1e-5.sh but for the coral runs, and
-# it discovers them instead of hardcoding a list, because which coral runs have
-# usable checkpoints changes while training is still going
+# runpod. same idea as rerun_tests_nondet_lr1e-5.sh but for the coral runs
+#
+# scoped to the lr1e-5 domcap2 run by default, because that is the one that
+# needs it: its rounds 0 and 1 were evaluated before the sentinel patch and its
+# round 2 after, so the three rounds in checkpoints/ are not on the same metric
+# and cannot be averaged. the lr1e-4 run is internally consistent (all three
+# rounds predate the patch), and the diverse runs have no checkpoints yet
+#
+# widen it when that changes, the sentinels stop anything being redone:
+#   RUN_GLOB='runs/gwhd_coral_*' bash rerun_tests_coral.sh
 #
 # a (run, round) is picked up when both of these are true
-#   runs/gwhd_coral_*/checkpoints/<weights_file>.ckpt exists
-#   runs/gwhd_coral_*/checkpoints/<weights_file>.done exists
+#   <run>/checkpoints/<weights_file>.ckpt exists
+#   <run>/checkpoints/<weights_file>.done exists
 # the .done is what the training script drops after a round finishes, so a
 # round that is still training is skipped rather than evaluated half trained.
 # last.ckpt is ignored, it is the resume checkpoint and not the best val_acc one
@@ -21,14 +28,15 @@
 #   REPO_ROOT   where newThesisRepo is         (default /workspace/newThesisRepo)
 #   ENV_NAME    conda env                      (default DGOD)
 #   SPLIT       test or val                    (default test)
-#   RUN_GLOB    which run dirs to consider     (default runs/gwhd_coral_*)
+#   RUN_GLOB    which run dirs to consider
+#               (default runs/gwhd_coral_nondet_domcap2_bs8_lr1e-5_reg055)
 
 set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-/workspace/newThesisRepo}"
 ENV_NAME="${ENV_NAME:-DGOD}"
 SPLIT="${SPLIT:-test}"
-RUN_GLOB="${RUN_GLOB:-runs/gwhd_coral_*}"
+RUN_GLOB="${RUN_GLOB:-runs/gwhd_coral_nondet_domcap2_bs8_lr1e-5_reg055}"
 
 cd "${REPO_ROOT}"
 
