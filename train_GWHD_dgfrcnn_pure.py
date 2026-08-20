@@ -151,6 +151,28 @@ def collate_fn(batch):
     return images, targets, torch.tensor(domain_labels), orig_img
 
 
+def mean_scored_map(values):
+    """mean of one domain's per image map@50, skipping the unscorable images
+
+    torchmetrics follows the pycocotools convention where map_50 comes back as
+    -1 when a class has no ground truth instances at all, which for a per image
+    compute fires on every image whose BoxesString is "no_box". that -1 is a
+    "could not be scored" flag and not a score, so averaging it in drags the
+    domain mean below zero, which is how gwhd val UQ_2 (13 no_box images out of
+    16) ended up around -0.6 no matter how good the detector was. test
+    Terraref_2 and CIMMYT_3 were being deflated the same way, just not far
+    enough to go negative and get noticed
+
+    comes back as (mean, num_scored), mean is nan if a domain had no scorable
+    image at all
+    """
+    values = torch.stack(values)
+    scored = values[values >= 0]
+    if scored.numel() == 0:
+        return float("nan"), 0
+    return float(torch.mean(scored).item()), int(scored.numel())
+
+
 class GRLayer(Function):
 
     @staticmethod
@@ -466,7 +488,8 @@ class DGFRCNN(LightningModule):
         
       
       for key in self.per_domain_mAP.keys():
-        print(key, torch.mean(torch.stack(self.per_domain_mAP[key])), len(self.per_domain_mAP[key]))    
+        mean_map_50, num_scored = mean_scored_map(self.per_domain_mAP[key])
+        print(key, mean_map_50, num_scored, len(self.per_domain_mAP[key]))
    
 def parser_args():
   parser = argparse.ArgumentParser(description='DGFRCNN Main Experiments')

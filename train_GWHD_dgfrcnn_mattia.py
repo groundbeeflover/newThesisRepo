@@ -175,6 +175,28 @@ def collate_fn(batch):
     return images, targets, torch.tensor(domain_labels), orig_img
 
 
+def mean_scored_map(values):
+    """mean of one domain's per image map@50, skipping the unscorable images
+
+    torchmetrics follows the pycocotools convention where map_50 comes back as
+    -1 when a class has no ground truth instances at all, which for a per image
+    compute fires on every image whose BoxesString is "no_box". that -1 is a
+    "could not be scored" flag and not a score, so averaging it in drags the
+    domain mean below zero, which is how gwhd val UQ_2 (13 no_box images out of
+    16) ended up around -0.6 no matter how good the detector was. test
+    Terraref_2 and CIMMYT_3 were being deflated the same way, just not far
+    enough to go negative and get noticed
+
+    comes back as (mean, num_scored), mean is nan if a domain had no scorable
+    image at all
+    """
+    values = torch.stack(values)
+    scored = values[values >= 0]
+    if scored.numel() == 0:
+        return float("nan"), 0
+    return float(torch.mean(scored).item()), int(scored.numel())
+
+
 class GRLayer(Function):
 
     @staticmethod
@@ -598,9 +620,11 @@ class DGFRCNN(LightningModule):
             pickle.dump(metrics["precision"].cpu(), f)
 
         for key in self.per_domain_mAP.keys():
+            mean_map_50, num_scored = mean_scored_map(self.per_domain_mAP[key])
             print(
                 key,
-                torch.mean(torch.stack(self.per_domain_mAP[key])),
+                mean_map_50,
+                num_scored,
                 len(self.per_domain_mAP[key]),
             )
 
@@ -621,9 +645,15 @@ def evaluate_map(detector, dataloader, device):
 
     comes back as (results, per_domain_rows), results being the usual
     map/map_50/map_75 dict and per_domain_rows a list of
-    {"domain_index", "domain_name", "num_images", "map_50"}, one per domain in
-    the dataloader, domain_name comes off dataloader.dataset.domain_names and
-    falls back to the raw index as a string if that isn't there
+    {"domain_index", "domain_name", "num_images", "num_images_scored",
+    "map_50"}, one per domain in the dataloader, domain_name comes off
+    dataloader.dataset.domain_names and falls back to the raw index as a string
+    if that isn't there
+
+    num_images is every image in the domain and num_images_scored is how many
+    of them torchmetrics could actually score, the two differ on domains with
+    "no_box" images and map_50 is the mean over the scored ones only, see
+    mean_scored_map
     """
     detector.eval()
     detector.to(device)
@@ -688,17 +718,18 @@ def evaluate_map(detector, dataloader, device):
     if results["map_per_class"].numel() > 0:
         print(f"AP per class: {results['map_per_class'].detach().cpu().tolist()}")
 
-    print("\nPer-domain mAP@50 (domain, mean, num_images)")
+    print("\nPer-domain mAP@50 (domain, mean, num_scored, num_images)")
     print("==================")
     per_domain_rows = []
     for key in sorted(per_domain_mAP.keys()):
-        values = torch.stack(per_domain_mAP[key])
-        mean_map_50 = float(torch.mean(values).item())
-        print(key, mean_map_50, len(values))
+        mean_map_50, num_scored = mean_scored_map(per_domain_mAP[key])
+        num_images = len(per_domain_mAP[key])
+        print(key, mean_map_50, num_scored, num_images)
         per_domain_rows.append({
             "domain_index": key,
             "domain_name": domain_names.get(key, str(key)),
-            "num_images": len(values),
+            "num_images": num_images,
+            "num_images_scored": num_scored,
             "map_50": mean_map_50,
         })
 
